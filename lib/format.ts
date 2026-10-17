@@ -91,8 +91,22 @@ export function formatDuration(seconds: number): string {
   return `${Math.floor(seconds / (86400 * 7))}w`;
 }
 
+/** Format a timestamp as a compact relative value using the largest useful unit. */
+export function formatRelativeTime(timestamp: number | Date, now = Date.now()): string {
+  const then = timestamp instanceof Date ? timestamp.getTime() : timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp;
+  const seconds = Math.round((now - then) / 1000);
+  const future = seconds < 0;
+  const value = Math.abs(seconds);
+  const units: Array<[number, string]> = [[31536000, 'year'], [2592000, 'month'], [604800, 'week'], [86400, 'day'], [3600, 'hour'], [60, 'minute']];
+  const unit = units.find(([size]) => value >= size);
+  const amount = unit ? Math.floor(value / unit[0]) : value;
+  const label = unit ? unit[1] : 'second';
+  return `${future ? 'in ' : ''}${amount} ${label}${amount === 1 ? '' : 's'}${future ? '' : ' ago'}`;
+}
+
 /** Truncate a Stellar address for display: GABC…XYZ */
 export function truncateAddress(addr: string, chars = 4): string {
   if (addr.length <= chars * 2 + 3) return addr;
   return `${addr.slice(0, chars)}…${addr.slice(-chars)}`;
 }
+
