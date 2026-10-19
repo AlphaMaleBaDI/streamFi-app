@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter }        from 'next/navigation';
 import { useForm }          from 'react-hook-form';
 import { zodResolver }      from '@hookform/resolvers/zod';
@@ -11,49 +11,93 @@ import { createStream, isMock } from '@/lib/factory';
 import { TOKENS_TESTNET, tokenLogoUrl } from '@/lib/tokens';
 import { CopyHashButton }   from '@/components/ui/CopyHashButton';
 import { checkRecipientExists } from '@/lib/soroban';
-import { refreshStreamData } from '@/lib/queryClient';
+import { checkContractHasWithdraw } from '@/lib/contract-recipient-probe';
+import { queryClient, refreshStreamData } from '@/lib/queryClient';
+import { invalidateTokenBalance } from '@/hooks/useTokenBalance';
 import { getFactoryContractId } from '@/lib/env';
 import { getTokenAllowanceGateway } from '@/lib/token-allowance-gateway';
+import { useDebounce } from '@/hooks/useDebounce';
 import styles from './CreateStream.module.css';
 import { toStroops, fromStroops, wouldRateTruncateToZero } from '@/lib/format';
-import { isValidStellarAddress } from '@/lib/stellar-address';
+import { isValidStellarAddress, isValidStellarContract, isValidStellarPublicKey } from '@/lib/stellar-address';
+import { withTimeout } from '@/lib/with-timeout';
 
 
-const schema = z.object({
-  recipient:       z.string()
-    .min(56, 'Must be a valid Stellar address (56 characters)')
-    .max(56, 'Must be a valid Stellar address (56 characters)')
-    .refine(isValidStellarAddress, 'Must be a valid Stellar address (G… or C…)'),
-  token:           z.string().min(1, 'Select a token'),
-  depositAmount:   z.string().regex(/^\d+(\.\d+)?$/, 'Enter a valid amount').refine(val => parseFloat(val) > 0, 'Amount must be greater than 0'),
-  // #319 — no upper bound previously meant an accidental extra digit (e.g.
-  // 25920000 instead of 2592000) had no client-side guard before signing.
-  // 10 years mirrors DripGovernor's own default max_duration_seconds cap.
-  durationSeconds: z.coerce.number().min(3600, 'Minimum 1 hour').max(315_360_000, 'Maximum 10 years'),
-  clawback:        z.boolean(),
-});
+const createStreamSchema = (connectedPublicKey?: string | null) =>
+  z.object({
+    recipient:       z.string()
+      .min(56, 'Must be a valid Stellar address (56 characters)')
+      .max(56, 'Must be a valid Stellar address (56 characters)')
+      .refine(
+        (v) => isValidStellarPublicKey(v) || isValidStellarContract(v),
+        'Must be a valid Stellar address (G… account or C… contract)',
+      ),
+    token:           z.string().min(1, 'Select a token'),
+    depositAmount:   z.string().regex(/^\d+(\.\d+)?$/, 'Enter a valid amount').refine(val => parseFloat(val) > 0, 'Amount must be greater than 0'),
+    // #319 — no upper bound previously meant an accidental extra digit (e.g.
+    // 25920000 instead of 2592000) had no client-side guard before signing.
+    // 10 years mirrors DripGovernor's own default max_duration_seconds cap.
+    durationSeconds: z.coerce.number().min(3600, 'Minimum 1 hour').max(315_360_000, 'Maximum 10 years'),
+    clawback:        z.boolean(),
+    // #392 — only meaningful for a C… recipient; see the superRefine below.
+    acknowledgeContractRecipient: z.boolean(),
+    // #591 — only meaningful when recipient matches connected wallet publicKey
+    acknowledgeSelfRecipient: z.boolean(),
+  }).superRefine((data, ctx) => {
+    // A contract can be set as a stream's recipient, but only an address that
+    // can *call* DripStream::withdraw as the recipient can ever pull the funds
+    // out. A SAC, a plain token contract, or a vault without that call path
+    // leaves the whole deposit stranded, and nothing on-chain can tell us in
+    // advance which kind we were handed — so the user has to say so.
+    if (isValidStellarContract(data.recipient) && !data.acknowledgeContractRecipient) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['acknowledgeContractRecipient'],
+        message: 'Confirm this contract can call withdraw() before creating the stream.',
+      });
+    }
+
+    // #591 — streaming to yourself is rarely intentional; require confirmation
+    if (
+      connectedPublicKey &&
+      data.recipient &&
+      data.recipient.trim() === connectedPublicKey.trim() &&
+      !data.acknowledgeSelfRecipient
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['acknowledgeSelfRecipient'],
+        message: 'Confirm you want to create a stream to your own connected address.',
+      });
+    }
+  });
+
+const schema = createStreamSchema();
 
 /**
  * Timeout for the full create-stream pipeline (simulate + sign + submit + poll).
  * Must stay well below START_TIME_BUFFER_S so that start_time is always in the
  * future even on a congested network (see #373).
  */
+const DURATION_PRESETS = [
+  { label: '1 day',   seconds: 86_400 },
+  { label: '1 week',  seconds: 604_800 },
+  { label: '1 month', seconds: 2_592_000 },
+  { label: '1 year',  seconds: 31_536_000 },
+] as const;
+
 const CREATE_STREAM_TIMEOUT_MS = 60_000;
+const DRAFT_KEY = 'conduit:create-stream-draft';
 
 /**
- * Race a promise against a timeout. Rejects with a descriptive error
- * if the operation does not complete within `ms` milliseconds.
+ * Timeout message for the create pipeline. It is rendered inline in the form,
+ * so it stays form-specific rather than using the shared helper's default
+ * `… timed out after 60000ms` (#393).
  */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${ms / 1000}s. The network may be congested — please try again.`));
-    }, ms);
-    promise.then(
-      (val) => { clearTimeout(timer); resolve(val); },
-      (err) => { clearTimeout(timer); reject(err); },
-    );
-  });
+function createTimeoutError(ms: number, label?: string): Error {
+  return new Error(
+    `${label ?? 'The operation'} timed out after ${ms / 1000}s. The network may be congested — please try again.`,
+  );
 }
 
 type FormValues = z.infer<typeof schema>;
@@ -76,26 +120,65 @@ export default function CreatePage() {
   // the Zod length/format guard (i.e. it's a plausible 56-char G… key).
   // Debounced to avoid hammering the RPC on every keystroke.
   const [recipientStatus, setRecipientStatus] = useState<
-    'idle' | 'checking' | 'valid' | 'not-found' | 'error'
+    'idle' | 'checking' | 'valid' | 'not-found' | 'error' | 'contract-checking' | 'contract-no-withdraw'
   >('idle');
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // #309 — request-sequence guard so a stale in-flight checkRecipientExists()
-  // call can't overwrite recipientStatus after a newer one has already
-  // resolved (or started), mirroring app/stream/[id]/page.tsx's loadSeq/
-  // isCurrent() pattern.
-  const recipientSeqRef = useRef(0);
 
-  const { register, handleSubmit, watch, formState: { errors } } = useForm<FormValues>({
-    resolver: zodResolver(schema),
-    defaultValues: { token: 'XLM', clawback: false, durationSeconds: 2592000 },
+  const formSchema = useMemo(() => createStreamSchema(publicKey), [publicKey]);
+
+  const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<FormValues>({
+    resolver: zodResolver(formSchema),
+    defaultValues: {
+      token: 'XLM',
+      clawback: false,
+      durationSeconds: 2592000,
+      acknowledgeContractRecipient: false,
+      acknowledgeSelfRecipient: false,
+    },
   });
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(DRAFT_KEY);
+      if (saved) {
+        const draft = JSON.parse(saved) as Partial<FormValues>;
+        for (const key of ['recipient', 'token', 'depositAmount', 'durationSeconds', 'clawback'] as const) {
+          if (draft[key] !== undefined) setValue(key, draft[key] as never);
+        }
+      }
+    } catch { /* stale or unavailable storage is non-fatal */ }
+  }, [setValue]);
+
+  useEffect(() => {
+    const subscription = watch((values) => {
+      try { localStorage.setItem(DRAFT_KEY, JSON.stringify(values)); } catch { /* storage is optional */ }
+    });
+    return () => subscription.unsubscribe();
+  }, [watch]);
 
   const deposit  = watch('depositAmount');
   const duration = watch('durationSeconds');
   const token    = watch('token');
   const recipient = watch('recipient');
+  const acknowledgedContractRecipient = watch('acknowledgeContractRecipient');
+  const acknowledgedSelfRecipient = watch('acknowledgeSelfRecipient');
 
-  // Debounced async on-chain account existence check. Only fires once the
+  // #392 — a C… recipient needs an explicit acknowledgement before submit.
+  const isContractRecipient = !!recipient && isValidStellarContract(recipient);
+
+  // #591 — warning when recipient is sender's own connected address.
+  const isSelfRecipient = !!publicKey && !!recipient && recipient.trim() === publicKey.trim();
+
+  // The acknowledgement is about one specific address, so editing the
+  // address always withdraws it.
+  useEffect(() => {
+    setValue('acknowledgeContractRecipient', false);
+    setValue('acknowledgeSelfRecipient', false);
+  }, [recipient, setValue]);
+
+  // Debounce the recipient input with a 600ms delay to reduce RPC calls
+  const [debouncedRecipient, { flush: flushRecipient }] = useDebounce(recipient, 600);
+
+  // Async on-chain account existence check. Only fires once the
   // address satisfies the Zod schema (56 chars, starts with G) so we never
   // waste an RPC call on a partially-typed address — Zod already owns
   // partial-input/format feedback exclusively.
@@ -109,10 +192,7 @@ export default function CreatePage() {
   //   3. If the component unmounts mid-flight the state update is suppressed.
   const RECIPIENT_CHECK_TIMEOUT_MS = 10_000;
   useEffect(() => {
-    const seq = ++recipientSeqRef.current;
-    const isCurrent = () => seq === recipientSeqRef.current;
-
-    const validLength = recipient?.length === 56;
+    const validLength = debouncedRecipient?.length === 56;
 
     if (!validLength) {
       setRecipientStatus('idle');
@@ -121,40 +201,49 @@ export default function CreatePage() {
 
     setRecipientStatus('checking');
 
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-
     const controller = new AbortController();
+    let isMounted = true;
 
-    debounceRef.current = setTimeout(async () => {
+    (async () => {
       // Hard timeout: if the RPC never responds, reject after 10s so the
       // spinner is always cleared.
       const timeoutId = setTimeout(() => controller.abort('timeout'), RECIPIENT_CHECK_TIMEOUT_MS);
 
       try {
         // Add a 10-second timeout to prevent an infinite loading state (#123)
-        const exists = await checkRecipientExists(recipient, { timeoutMs: 10_000 });
-        if (!isCurrent()) return;
-        setRecipientStatus(exists ? 'valid' : 'not-found');
+        const exists = await checkRecipientExists(debouncedRecipient, { timeoutMs: 10_000 });
+        if (!isMounted) return;
+        if (exists && isValidStellarContract(debouncedRecipient)) {
+          setRecipientStatus('contract-checking');
+          // Probe the contract for a withdraw() entry point (#458)
+          const walletPk = watch('token') ? (window as any).stellarWallet?.publicKey : undefined;
+          const sourceAddr = walletPk || debouncedRecipient;
+          try {
+            const hasWithdraw = await checkContractHasWithdraw(debouncedRecipient, sourceAddr, { timeoutMs: 10_000 });
+            if (!isMounted) return;
+            setRecipientStatus(hasWithdraw ? 'valid' : 'contract-no-withdraw');
+          } catch {
+            if (!isMounted) return;
+            setRecipientStatus('valid'); // Fallback: allow if probe fails
+          }
+        } else {
+          setRecipientStatus(exists ? 'valid' : 'not-found');
+        }
       } catch (err) {
         // Network / RPC error — don't block the user, but surface a warning.
-        if (!isCurrent()) return;
+        if (!isMounted) return;
         console.error('Recipient check failed:', err);
         setRecipientStatus('error');
-      } finally {
-        clearTimeout(timeoutId);
       }
-    }, 600);
+    })();
 
     return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
+      isMounted = false;
       // Cancel any in-flight check so the status doesn't flip back to
       // 'valid'/'not-found'/'error' after the address has already changed.
       controller.abort('cancelled');
-      // Immediately clear the checking state on cleanup so the button
-      // label resets if the user clears the field while a check is pending.
-      setRecipientStatus('idle');
     };
-  }, [recipient]);
+  }, [debouncedRecipient]);
 
   // Tokens aren't all 7 decimals (the native XLM/SAC convention) — this app
   // supports arbitrary TOKENS_TESTNET entries, so the preview must use each
@@ -202,12 +291,37 @@ export default function CreatePage() {
     // can still be in flight when the user clicks Submit, and without this
     // guard the not-found check below is bypassed entirely, letting a
     // stream get created for a nonexistent recipient.
+    // #672 — a debounce still pending at submit means recipientStatus
+    // describes an older address. Flush it so the check starts now, and
+    // make the user retry once it has verified the address actually entered.
+    if (debouncedRecipient !== data.recipient) {
+      flushRecipient();
+      setError('Still verifying the recipient address — please wait a moment and try again.');
+      return;
+    }
     if (recipientStatus === 'not-found') {
       setError('Recipient account does not exist on-chain. Please check the address.');
       return;
     }
     if (recipientStatus === 'checking') {
       setError('Still verifying the recipient address — please wait a moment and try again.');
+      return;
+    }
+    // #392 — belt and braces alongside the schema check, mirroring the
+    // recipientStatus guards above: never sign a deposit into a contract the
+    // user hasn't confirmed can withdraw from the stream.
+    if (isValidStellarContract(data.recipient) && !data.acknowledgeContractRecipient) {
+      setError('Confirm this contract can call withdraw() before creating the stream.');
+      return;
+    }
+    // #591 — belt and braces guard when recipient matches the connected sender address
+    if (
+      publicKey &&
+      data.recipient &&
+      data.recipient.trim() === publicKey.trim() &&
+      !data.acknowledgeSelfRecipient
+    ) {
+      setError('Confirm you want to create a stream to your own connected address.');
       return;
     }
     setPending(true);
@@ -288,14 +402,17 @@ export default function CreatePage() {
           clawback:   data.clawback,
         }, signTx),
         CREATE_STREAM_TIMEOUT_MS,
-        'Stream creation',
+        { label: 'Stream creation', onTimeout: createTimeoutError },
       );
 
       // Invalidate and refetch active stream data so the streams/dashboard
       // pages reflect the newly created stream immediately (fixes #162).
       await refreshStreamData();
+      // #756 — the deposit left the wallet; refresh the displayed token balance.
+      await invalidateTokenBalance(queryClient, publicKey, tokenAddr);
 
       setTxHash(hash);
+      try { localStorage.removeItem(DRAFT_KEY); } catch { /* storage is optional */ }
       // #362 — createStream now decodes the confirmed transaction's return
       // value, so we can deep-link straight to the new stream instead of
       // redirecting to /streams and hoping the user finds it. Fall back to
@@ -353,7 +470,7 @@ export default function CreatePage() {
             className="input font-mono"
           />
           {errors.recipient && (
-            <p className="text-xs text-red-600 mt-1">{errors.recipient.message}</p>
+            <p className="text-xs text-red-600 mt-1">{String(errors.recipient.message)}</p>
           )}
           {/* On-chain existence feedback — only shown once the address passes
               the Zod format check (no redundancy with live Zod validation) */}
@@ -363,19 +480,92 @@ export default function CreatePage() {
           {!errors.recipient && recipientStatus === 'not-found' && (
             <p className="text-xs text-red-600 mt-1" role="alert">
               <span aria-hidden="true">✗ </span>
-              Account not found on-chain — the recipient must be funded before receiving a stream.
+              {isContractRecipient
+                ? 'Contract not found on-chain — nothing is deployed at this address.'
+                : 'Account not found on-chain — the recipient must be funded before receiving a stream.'}
             </p>
           )}
           {!errors.recipient && recipientStatus === 'valid' && (
             <p className="text-xs text-gray-500 mt-1" role="status">
               <span aria-hidden="true">✓ </span>
-              Account verified on-chain.
+              {isContractRecipient
+                ? 'Contract found on-chain. Whether it can withdraw cannot be verified — see below.'
+                : 'Account verified on-chain.'}
             </p>
           )}
           {!errors.recipient && recipientStatus === 'error' && (
             <p className="text-xs text-gray-400 mt-1" role="status">
-              Could not verify account — network error. You may still proceed.
+              Could not check this address — the RPC endpoint may be unreachable or
+              misconfigured. This is not a statement about the recipient; you may still proceed.
             </p>
+          )}
+
+          {/* #392 — a contract recipient can only receive a stream it is able
+              to withdraw from. Nothing on-chain reveals that ahead of time, so
+              the risk is stated plainly and submit stays blocked until the
+              user acknowledges it. */}
+          {!errors.recipient && isContractRecipient && (
+            <div
+              className="mt-2 border border-red-200 rounded px-3 py-2"
+              role="alert"
+            >
+              <p className="text-xs font-semibold text-red-600">
+                Contract recipient — the deposit may be unrecoverable.
+              </p>
+              <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                Only an address that can call <span className="font-mono">withdraw()</span> on the
+                stream can ever pull these tokens out. A token or SAC contract, or a vault without
+                that call path, leaves the full deposit locked — and only the current recipient or
+                sender can re-point the stream afterwards.
+              </p>
+              <label className={`flex items-start gap-2 mt-2 cursor-pointer ${styles.flexRowStart}`}>
+                <input
+                  {...register('acknowledgeContractRecipient')}
+                  type="checkbox"
+                  className="mt-0.5 rounded border-gray-300"
+                />
+                <span className="text-xs text-gray-700 dark:text-gray-300">
+                  I control this contract and confirm it can call{' '}
+                  <span className="font-mono">withdraw()</span> on the stream.
+                </span>
+              </label>
+              {errors.acknowledgeContractRecipient && (
+                <p className="text-xs text-red-600 mt-1">
+                  {errors.acknowledgeContractRecipient.message}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* #591 — self-recipient warning when recipient equals connected wallet */}
+          {!errors.recipient && isSelfRecipient && (
+            <div
+              className="mt-2 border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/20 rounded px-3 py-2"
+              role="alert"
+            >
+              <p className="text-xs font-semibold text-amber-700 dark:text-amber-400">
+                Self-recipient warning — streaming to your own address.
+              </p>
+              <p className="text-xs text-amber-800/80 dark:text-amber-300/80 mt-1">
+                The recipient address matches your connected wallet. Streaming to yourself is rarely
+                intentional and may be a copy-paste error that will lock funds in a self-referential stream.
+              </p>
+              <label className={`flex items-start gap-2 mt-2 cursor-pointer ${styles.flexRowStart}`}>
+                <input
+                  {...register('acknowledgeSelfRecipient')}
+                  type="checkbox"
+                  className="mt-0.5 rounded border-gray-300"
+                />
+                <span className="text-xs text-gray-700 dark:text-gray-300">
+                  I understand and confirm I want to stream to my own connected address.
+                </span>
+              </label>
+              {errors.acknowledgeSelfRecipient && (
+                <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                  {errors.acknowledgeSelfRecipient.message}
+                </p>
+              )}
+            </div>
           )}
         </div>
 
@@ -423,6 +613,18 @@ export default function CreatePage() {
             className="input"
             type="number"
           />
+          <div className="flex flex-wrap gap-2 mt-2" role="group" aria-label="Duration presets">
+            {DURATION_PRESETS.map(p => (
+              <button
+                key={p.label}
+                type="button"
+                onClick={() => setValue('durationSeconds', p.seconds, { shouldValidate: true, shouldDirty: true })}
+                className="px-2 py-1 text-xs rounded border border-gray-300 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 dark:text-white"
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
           <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
             {duration ? `${Math.floor(duration / 86400)}d ${Math.floor((duration % 86400) / 3600)}h` : ''}
           </p>
@@ -485,7 +687,10 @@ export default function CreatePage() {
             !connected ||
             rateWouldBeZero ||
             recipientStatus === 'not-found' ||
-            recipientStatus === 'checking'
+            recipientStatus === 'contract-no-withdraw' ||
+            recipientStatus === 'checking' ||
+            (isContractRecipient && !acknowledgedContractRecipient) ||
+            (isSelfRecipient && !acknowledgedSelfRecipient)
           }
           className="btn-primary w-full"
         >

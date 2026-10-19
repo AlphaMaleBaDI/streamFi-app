@@ -25,3 +25,20 @@ export function isValidStellarContract(address: string): boolean {
 export function isValidStellarAddress(address: string): boolean {
   return isValidStellarPublicKey(address) || isValidStellarContract(address);
 }
+
+export interface FederationResolveOptions { signal?: AbortSignal; endpoint?: string; }
+
+/** Resolve a Stellar federation address such as `user*domain.com`. */
+export async function resolveFederationAddress(federationAddress: string, options: FederationResolveOptions = {}): Promise<string> {
+  const match = federationAddress.trim().match(/^([^*]+)\*([^*]+)$/);
+  if (!match) throw new Error('Invalid federation address (expected user*domain.com)');
+  const endpoint = options.endpoint ?? `https://${match[2]}/federation`;
+  const url = new URL(endpoint);
+  url.searchParams.set('q', federationAddress.trim());
+  url.searchParams.set('type', 'name');
+  const response = await fetch(url, { signal: options.signal, headers: { Accept: 'application/json' } });
+  if (!response.ok) throw new Error(`Federation lookup failed (${response.status})`);
+  const payload = await response.json() as { account_id?: string };
+  if (!payload.account_id || !isValidStellarPublicKey(payload.account_id)) throw new Error('Federation response did not contain a valid account');
+  return payload.account_id;
+}

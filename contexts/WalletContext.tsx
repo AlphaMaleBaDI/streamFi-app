@@ -27,12 +27,15 @@ import React, {
 } from 'react';
 import {
   isConnected as freighterIsConnected,
+  getNetwork,
   requestAccess,
   signTransaction,
   WatchWalletChanges,
 } from '@stellar/freighter-api';
 import { getNetworkPassphrase } from '@/lib/env';
+import { withTimeout } from '@/lib/with-timeout';
 import { queryClient } from '@/lib/queryClient';
+import { resetTokenAllowanceGateway } from '@/lib/token-allowance-gateway';
 import { useTransactionStore } from '@/lib/store';
 import { truncateAddress } from '@/lib/format';
 import { useRouter } from 'next/navigation';
@@ -40,7 +43,10 @@ import {
   clearWalletSession,
   loadWalletSession,
   saveWalletSession,
+  touchWalletSession,
 } from '@/lib/wallet-storage';
+import { resetServer, resetCircuitBreaker } from '@/lib/soroban';
+import { clearIdempotencyKeys } from '@/lib/safe-operations';
 import toast from 'react-hot-toast';
 
 // ── Concurrency Primitives ───────────────────────────────────────────────────
@@ -76,11 +82,24 @@ export class Mutex {
       const entry = (release: () => void) => {
         cleanup();
         if (abortSignal?.aborted) {
+          // `_release()` has already dequeued this waiter and handed the lock
+          // over to it, so rejecting without releasing strands the lock
+          // forever and deadlocks every later connect() (#389). Pass it on.
+          release();
           reject(new Error('Operation aborted'));
           return;
         }
         resolve(release);
       };
+
+      // A signal that is already aborted never fires an 'abort' event, so the
+      // listener below would never run and this waiter would sit in the queue
+      // until `_release()` handed it the lock — the same leak, reached from
+      // the other side (#389). Reject before queueing instead.
+      if (abortSignal?.aborted) {
+        reject(new Error('Operation aborted'));
+        return;
+      }
       this._queue.push(entry);
 
       if (abortSignal) {
@@ -154,6 +173,12 @@ export class Semaphore {
         resolver: (release: () => void) => {
           cleanup();
           if (signal?.aborted) {
+            // `_release()` has already dequeued this waiter and handed the
+            // permit to it without incrementing `_available`. Rejecting
+            // without releasing loses the permit permanently, and after
+            // `maxConcurrentOperations` of these the semaphore is exhausted
+            // and every signTx hangs forever (#389). Pass it on instead.
+            release();
             reject(new Error('Operation aborted'));
             return;
           }
@@ -226,6 +251,17 @@ const DEFAULT_MAX_CONCURRENT_OPS = 5;
  */
 const WALLET_CONNECT_TIMEOUT_MS = 15_000;
 
+/**
+ * Timeout message for wallet calls. This one reaches the user directly
+ * (ConnectButton renders it), so it stays wallet-specific rather than using
+ * the shared helper's default `… timed out after 15000ms` (#393).
+ */
+function walletTimeoutError(ms: number, label?: string): Error {
+  return new Error(
+    `${label ?? 'Wallet operation'} timed out after ${ms / 1000}s — the wallet or network may be unresponsive.`,
+  );
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface OperationResult<T = string> {
@@ -273,22 +309,6 @@ export function useWallet(): WalletState {
 
 // ── Provider ─────────────────────────────────────────────────────────────────
 
-/**
- * Race a promise against a timeout. Rejects with a clear error if the
- * promise does not resolve within `ms` milliseconds.
- */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${ms / 1000}s — the wallet or network may be unresponsive.`));
-    }, ms);
-    promise.then(
-      (val) => { clearTimeout(timer); resolve(val); },
-      (err) => { clearTimeout(timer); reject(err); },
-    );
-  });
-}
-
 export function WalletProvider({
   children,
   maxConcurrentOperations = DEFAULT_MAX_CONCURRENT_OPS,
@@ -327,6 +347,10 @@ export function WalletProvider({
     if (stored) {
       setPublicKey(stored.key);
       setWalletName(stored.name);
+      // A returning user with a still-valid session is active — slide the
+      // expiry so an open tab isn't force-disconnected 24h after the first
+      // connect (#430).
+      touchWalletSession();
     }
 
     return () => {
@@ -338,6 +362,55 @@ export function WalletProvider({
   }, []);
 
   // ── Operation tracking helper ──────────────────────────────────────────────
+
+  // ── Session expiry toast ───────────────────────────────────────────────────
+  useEffect(() => {
+    if (!publicKey) return;
+
+    let warned = false;
+    const interval = setInterval(() => {
+      const session = loadWalletSession();
+      if (!session?.expiresAt) return;
+
+      const remaining = session.expiresAt - Date.now();
+      const WARNING_MS = 5 * 60 * 1000; // 5 minutes
+
+      if (remaining <= 0) {
+        clearInterval(interval);
+        return;
+      }
+
+      if (remaining <= WARNING_MS && !warned) {
+        warned = true;
+        toast((t) => (
+          <span className="flex items-center gap-3">
+            <span>Your wallet session expires soon.</span>
+            <button
+              type="button"
+              onClick={() => {
+                touchWalletSession();
+                toast.dismiss(t.id);
+                toast.success('Session extended.');
+              }}
+              className="px-2 py-1 rounded bg-black text-white text-xs font-medium dark:bg-white dark:text-black"
+            >
+              Stay connected
+            </button>
+          </span>
+        ), { duration: Infinity, id: 'session-expiry' });
+      }
+
+      if (remaining > WARNING_MS && warned) {
+        warned = false;
+        toast.dismiss('session-expiry');
+      }
+    }, 60_000); // check every minute
+
+    return () => {
+      clearInterval(interval);
+      toast.dismiss('session-expiry');
+    };
+  }, [publicKey]);
 
   function trackOperation<T>(fn: () => Promise<T>): Promise<T> {
     setPendingOperationCount((c) => c + 1);
@@ -386,7 +459,7 @@ export function WalletProvider({
       const { isConnected: hasFreighter } = await withTimeout(
         freighterIsConnected(),
         WALLET_CONNECT_TIMEOUT_MS,
-        'Freighter connection check',
+        { label: 'Freighter connection check', onTimeout: walletTimeoutError },
       );
       if (requestId !== pendingRequestIdRef.current || !isMountedRef.current) return;
 
@@ -401,11 +474,30 @@ export function WalletProvider({
       const { address, error } = await withTimeout(
         requestAccess(),
         WALLET_CONNECT_TIMEOUT_MS,
-        'Freighter access request',
+        { label: 'Freighter access request', onTimeout: walletTimeoutError },
       );
       if (requestId !== pendingRequestIdRef.current || !isMountedRef.current) return;
       if (error || !address) {
         throw new Error(error?.message ?? 'Failed to connect to Freighter.');
+      }
+
+      // Verify the wallet's network matches the app's configured network
+      // before completing the connection (#418).
+      const { networkPassphrase: walletPassphrase, error: networkError } = await withTimeout(
+        getNetwork(),
+        WALLET_CONNECT_TIMEOUT_MS,
+        { label: 'Freighter network check', onTimeout: walletTimeoutError },
+      );
+      if (requestId !== pendingRequestIdRef.current || !isMountedRef.current) return;
+      if (networkError) {
+        throw new Error(networkError.message ?? 'Failed to read wallet network.');
+      }
+
+      const configuredPassphrase = getNetworkPassphrase();
+      if (walletPassphrase && walletPassphrase !== configuredPassphrase) {
+        throw new Error(
+          `Network mismatch: your wallet is set to "${walletPassphrase}" but the app expects "${configuredPassphrase}". Please switch your wallet to the correct network and try again.`,
+        );
       }
 
       setPublicKey(address);
@@ -440,7 +532,12 @@ export function WalletProvider({
     // Clear all cached stream data so a subsequent wallet connection
     // cannot see the previous wallet's streams (fixes #81 & #146).
     queryClient.clear();
+    resetTokenAllowanceGateway();
     clearTransactions();
+    resetServer();
+    resetCircuitBreaker();
+    resetTokenAllowanceGateway();
+    clearIdempotencyKeys();
     router.push('/');
   }, [clearTransactions, router]);
 
@@ -452,9 +549,17 @@ export function WalletProvider({
   // `publicKey` and every cached on-chain query pointed at the old account,
   // silently showing stale data (fixes #88).
   useEffect(() => {
+    // `WatchWalletChanges.stop()` only flips an internal flag; a poll
+    // iteration already awaiting Freighter when we call it still runs to
+    // completion and fires this callback one last time (and schedules one
+    // more `setTimeout` we cannot clear from out here). `active` is a
+    // per-effect-instance latch so that trailing tick — and any tick after
+    // an unmount or a dependency-triggered re-subscribe — is ignored instead
+    // of mutating state on a torn-down tree.
+    let active = true;
     const watcher = new WatchWalletChanges();
-    watcher.watch(({ address }) => {
-      if (!isMountedRef.current) return;
+    watcher.watch(({ address, networkPassphrase }) => {
+      if (!active || !isMountedRef.current) return;
       if (!publicKeyRef.current) return; // no active session to keep in sync
 
       if (!address) {
@@ -465,16 +570,43 @@ export function WalletProvider({
         disconnect();
         return;
       }
+
+      // Check for network change: if the wallet's network passphrase no
+      // longer matches the app's configured network, clear stale data and
+      // warn the user. This handles Freighter testnet<->mainnet switches
+      // that leave React Query caches pointing at the wrong network (#418).
+      const configuredPassphrase = getNetworkPassphrase();
+      if (networkPassphrase && networkPassphrase !== configuredPassphrase) {
+        queryClient.clear();
+        resetTokenAllowanceGateway();
+        clearTransactions();
+        resetServer();
+        resetCircuitBreaker();
+        clearIdempotencyKeys();
+        toast.error(
+          `Network mismatch: wallet is on a different network (${networkPassphrase}) than the app (${configuredPassphrase}). Please switch your wallet to the correct network.`,
+        );
+        return;
+      }
+
       if (address === publicKeyRef.current) return; // nothing actually changed
 
       setPublicKey(address);
       saveWalletSession({ key: address, name: 'Freighter' });
       queryClient.clear();
+      resetTokenAllowanceGateway();
       clearTransactions();
+      resetServer();
+      resetCircuitBreaker();
+      resetTokenAllowanceGateway();
+      clearIdempotencyKeys();
       toast(`Switched to ${truncateAddress(address)}`, { icon: '🔄' });
     });
 
-    return () => watcher.stop();
+    return () => {
+      active = false;
+      watcher.stop();
+    };
   }, [clearTransactions, disconnect]);
 
   // ── signTx ─────────────────────────────────────────────────────────────────
@@ -496,45 +628,49 @@ export function WalletProvider({
     const globalAbortCleanup = () => {
       operationAbortController.abort();
     };
-    abortControllerRef.current?.signal.addEventListener('abort', globalAbortCleanup, { once: true });
+    const globalAbortSignal = abortControllerRef.current?.signal;
+    globalAbortSignal?.addEventListener('abort', globalAbortCleanup, { once: true });
 
-    // Acquire a semaphore permit — limits concurrent Freighter popups
-    const release = await semaphoreRef.current.acquire(combinedSignal);
+    try {
+      // Acquire a semaphore permit — limits concurrent Freighter popups
+      const release = await semaphoreRef.current.acquire(combinedSignal);
 
-    return trackOperation(async () => {
-      try {
-        if (combinedSignal.aborted) {
-          throw new Error('Operation aborted');
+      return await trackOperation(async () => {
+        try {
+          if (combinedSignal.aborted) {
+            throw new Error('Operation aborted');
+          }
+
+          const requestId = pendingRequestIdRef.current;
+          const currentPublicKey = publicKeyRef.current;
+          const { signedTxXdr, error } = await withTimeout(
+            signTransaction(xdr, {
+              networkPassphrase: getNetworkPassphrase(),
+              address:           currentPublicKey ?? undefined,
+            }),
+            WALLET_CONNECT_TIMEOUT_MS,
+            'Freighter signing',
+          );
+
+          if (combinedSignal.aborted) {
+            throw new Error('Operation aborted');
+          }
+
+          if (requestId !== pendingRequestIdRef.current || currentPublicKey !== publicKeyRef.current) {
+            throw new Error('Wallet state changed during signing. Please retry the operation.');
+          }
+
+          if (error || !signedTxXdr) {
+            throw new Error(error?.message ?? 'Failed to sign transaction in Freighter.');
+          }
+          return signedTxXdr;
+        } finally {
+          release();
         }
-
-        const requestId = pendingRequestIdRef.current;
-        const currentPublicKey = publicKeyRef.current;
-        const { signedTxXdr, error } = await withTimeout(
-          signTransaction(xdr, {
-            networkPassphrase: getNetworkPassphrase(),
-            address:           currentPublicKey ?? undefined,
-          }),
-          WALLET_CONNECT_TIMEOUT_MS,
-          'Freighter signing',
-        );
-
-        if (combinedSignal.aborted) {
-          throw new Error('Operation aborted');
-        }
-
-        if (requestId !== pendingRequestIdRef.current || currentPublicKey !== publicKeyRef.current) {
-          throw new Error('Wallet state changed during signing. Please retry the operation.');
-        }
-
-        if (error || !signedTxXdr) {
-          throw new Error(error?.message ?? 'Failed to sign transaction in Freighter.');
-        }
-        return signedTxXdr;
-      } finally {
-        release();
-        abortControllerRef.current?.signal.removeEventListener('abort', globalAbortCleanup);
-      }
-    });
+      });
+    } finally {
+      globalAbortSignal?.removeEventListener('abort', globalAbortCleanup);
+    }
   }, [publicKey, trackOperation]);
 
   // ── Memoized context value ─────────────────────────────────────────────────

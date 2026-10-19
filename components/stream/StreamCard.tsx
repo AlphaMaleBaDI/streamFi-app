@@ -1,21 +1,29 @@
-import Link                    from 'next/link';
-import { Badge }               from '@/components/ui/Badge';
-import { StreamProgressBar }   from '@/components/stream/StreamProgressBar';
-import { truncateAddress, fromStroops } from '@/lib/format';
+"use client";
+
+import Link from "next/link";
+import { useState, useEffect } from "react";
+import { Badge } from "@/components/ui/Badge";
+import { StreamProgressBar } from "@/components/stream/StreamProgressBar";
+import { fromStroops } from "@/lib/format";
+import { CopyAddress } from "@/components/ui/CopyAddress";
+import { getStreamNote } from "@/lib/stream-notes-storage";
+import { useSettings } from "@/hooks/useSettings";
 
 interface StreamCardProps {
-  id:            string;
-  counterparty:  string;   // sender (if you're recipient) or recipient (if you're sender)
-  role:          'sender' | 'recipient';
-  token:         string;
+  id: string;
+  counterparty: string; // sender (if you're recipient) or recipient (if you're sender)
+  role: "sender" | "recipient";
+  token: string;
   ratePerSecond: bigint;
   /** Unix timestamp (seconds) when the stream started */
-  startTime:     number;
+  startTime: number;
   /** Unix timestamp (seconds) when the stream ends (0 = open-ended) */
-  endTime:       number;
-  status:        'active' | 'paused' | 'ended' | 'cancelled';
+  endTime: number;
+  status: "active" | "paused" | "ended" | "cancelled";
   /** Unix timestamp (seconds) when the stream was paused — required to freeze the % label correctly while status === 'paused' */
-  pausedAt?:     number;
+  pausedAt?: number;
+  /** Stream address for note lookup */
+  streamAddress?: string;
 }
 
 export function StreamCard({
@@ -28,8 +36,22 @@ export function StreamCard({
   endTime,
   status,
   pausedAt,
+  streamAddress,
 }: StreamCardProps) {
   const rateFormatted = fromStroops(ratePerSecond);
+  const { advancedMode } = useSettings();
+  const [note, setNote] = useState<string | null>(null);
+
+  // Load note from storage
+  useEffect(() => {
+    if (streamAddress) {
+      const storedNote = getStreamNote(streamAddress);
+      setNote(storedNote);
+    }
+  }, [streamAddress]);
+
+  // Client-only wall-clock snapshot for cancelled streams
+  const [mountSec] = useState(() => Date.now() / 1_000);
 
   // Derive a snapshot percentage for the text label only (no state, no timer)
   const pctSnapshot = (() => {
@@ -39,34 +61,63 @@ export function StreamCard({
     // Paused streams freeze at pausedAt, not the wall-clock time this
     // renders at — otherwise the % label keeps climbing for a stream
     // that isn't actually streaming.
-    const now = status === 'paused' && pausedAt ? pausedAt : Date.now() / 1_000;
+    // Cancelled streams freeze at min(now, endTime) captured once at mount.
+    let now = Date.now() / 1_000;
+    if (status === "paused" && pausedAt) {
+      now = pausedAt;
+    } else if (status === "cancelled") {
+      now = endTime > 0 ? Math.min(mountSec, endTime) : mountSec;
+    }
     return Math.min(100, Math.max(0, ((now - startTime) / total) * 100));
   })();
 
   return (
-    <Link href={`/stream/${id}`} className="card block hover:border-black dark:hover:border-white transition-colors group">
+    <Link
+      href={`/stream/${id}`}
+      className="card block hover:border-black dark:hover:border-white transition-colors group"
+    >
       <div className="flex items-center justify-between gap-2 mb-3">
         <div className="min-w-0">
           <p className="text-xs text-gray-400 dark:text-gray-500 mb-0.5">
-            {role === 'recipient' ? 'From' : 'To'}
+            {role === "recipient" ? "From" : "To"}
           </p>
-          <p className="font-mono text-xs text-black dark:text-white truncate max-w-[110px] sm:max-w-[180px]">
-            {truncateAddress(counterparty)}
-          </p>
+          <div className="truncate max-w-[110px] sm:max-w-[180px]">
+            <CopyAddress address={counterparty} />
+          </div>
         </div>
 
         {/* Rate number centered, green text */}
-        <div
-          className="amount text-xs sm:text-sm font-bold text-green-600 dark:text-green-400 truncate text-center px-1"
-          aria-label={`streaming rate: ${rateFormatted} per second`}
-        >
-          {rateFormatted}/s
+        <div className="flex flex-col items-center px-1 min-w-0">
+          <div
+            className="amount text-xs sm:text-sm font-bold text-green-600 dark:text-green-400 truncate text-center"
+            aria-label={`streaming rate: ${rateFormatted} per second`}
+          >
+            {rateFormatted}/s
+          </div>
+          {/* Raw stroop rate — only in advanced mode (#586) */}
+          {advancedMode && (
+            <span
+              className="font-mono text-[10px] text-gray-400 dark:text-gray-500 truncate"
+              title={`${ratePerSecond.toString()} stroops per second`}
+            >
+              {ratePerSecond.toString()} stroops/s
+            </span>
+          )}
         </div>
 
         <div className="shrink-0">
           <Badge status={status} />
         </div>
       </div>
+
+      {/* Note if present */}
+      {note && (
+        <div className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-900/50">
+          <p className="text-xs text-blue-700 dark:text-blue-300 line-clamp-2">
+            {note}
+          </p>
+        </div>
+      )}
 
       {/* CSS-animated progress bar — zero React state updates */}
       <StreamProgressBar
@@ -77,9 +128,12 @@ export function StreamCard({
       />
 
       <div className="flex items-center justify-between mt-3 text-xs">
-        <span className="text-gray-500 dark:text-gray-400 font-mono truncate max-w-[200px] sm:max-w-[300px]">
-          {truncateAddress(token)}
-        </span>
+        <CopyAddress
+          address={token}
+          className="text-gray-500 dark:text-gray-400"
+          maxWidth="max-w-[200px] sm:max-w-[300px]"
+          showQrCode
+        />
         <span className="text-[10px] text-gray-400 dark:text-gray-500 font-medium font-mono">
           {Math.round(pctSnapshot)}%
         </span>
