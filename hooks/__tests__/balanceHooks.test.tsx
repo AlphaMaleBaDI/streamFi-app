@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { isLowReserve, useWalletBalance } from '../useWalletBalance';
+import {
+  CACHED_XLM_BALANCE_KEY,
+  getCachedXlmBalance,
+  isLowReserve,
+  setCachedXlmBalance,
+  useWalletBalance,
+} from '../useWalletBalance';
 import {
   BALANCE_DEBOUNCE_MS,
   clearTokenBalanceCache,
@@ -23,6 +29,11 @@ function wrapper(qc: QueryClient) {
 
 afterEach(() => {
   clearTokenBalanceCache();
+  try {
+    localStorage.removeItem(CACHED_XLM_BALANCE_KEY);
+  } catch {
+    /* storage unavailable in env */
+  }
   vi.unstubAllGlobals();
 });
 
@@ -43,6 +54,51 @@ describe('useWalletBalance low reserve (#757)', () => {
     const { result } = renderHook(() => useWalletBalance('GABC'), { wrapper: wrapper(qc) });
     await waitFor(() => expect(result.current.balance).toBe(1.5));
     expect(result.current.isLowReserve).toBe(true);
+  });
+});
+
+describe('useWalletBalance localStorage cache (#813)', () => {
+  it('reads and writes to cached_xlm_balance key in localStorage', () => {
+    setCachedXlmBalance(42.5);
+    expect(localStorage.getItem(CACHED_XLM_BALANCE_KEY)).toBe('42.5');
+    expect(getCachedXlmBalance()).toBe(42.5);
+  });
+
+  it('returns null when cached_xlm_balance is missing or invalid', () => {
+    localStorage.removeItem(CACHED_XLM_BALANCE_KEY);
+    expect(getCachedXlmBalance()).toBeNull();
+
+    localStorage.setItem(CACHED_XLM_BALANCE_KEY, 'not-a-number');
+    expect(getCachedXlmBalance()).toBeNull();
+  });
+
+  it('provides cached balance instantly as initial state before fetch finishes', async () => {
+    localStorage.setItem(CACHED_XLM_BALANCE_KEY, '12.34');
+
+    // Deferred fetch promise so we can assert the instant initial render value
+    let resolveFetch: (val: any) => void;
+    const fetchPromise = new Promise((resolve) => {
+      resolveFetch = resolve;
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(fetchPromise));
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useWalletBalance('GABC'), { wrapper: wrapper(qc) });
+
+    // Initial state is optimistic from localStorage without waiting for Horizon response
+    expect(result.current.balance).toBe(12.34);
+    expect(result.current.isLoading).toBe(false);
+
+    // Now resolve the fresh fetch
+    resolveFetch!({
+      ok: true,
+      status: 200,
+      json: async () => ({ balances: [{ asset_type: 'native', balance: '20.0000000' }] }),
+    });
+
+    await waitFor(() => expect(result.current.balance).toBe(20));
+    expect(localStorage.getItem(CACHED_XLM_BALANCE_KEY)).toBe('20');
   });
 });
 
