@@ -10,6 +10,8 @@ import { useWallet }        from '@/contexts/WalletContext';
 import { createStream, isMock } from '@/lib/factory';
 import { TOKENS_TESTNET, tokenLogoUrl } from '@/lib/tokens';
 import { CopyHashButton }   from '@/components/ui/CopyHashButton';
+import { FirstStreamNotificationPrompt } from '@/components/FirstStreamNotificationPrompt';
+import { hasCreatedStream, markFirstStreamCreated } from '@/lib/notifications';
 import { checkRecipientExists } from '@/lib/soroban';
 import { checkContractHasWithdraw } from '@/lib/contract-recipient-probe';
 import { queryClient, refreshStreamData } from '@/lib/queryClient';
@@ -110,6 +112,9 @@ export default function CreatePage() {
   const [pending, setPending] = useState(false);
   const [txHash,  setTxHash]  = useState<string | null>(null);
   const [error,   setError]   = useState<string | null>(null);
+  // #810 — only offer the notification opt-in after the very first successful
+  // stream creation.
+  const [firstStreamCreated, setFirstStreamCreated] = useState(false);
 
   // Tracks the SEP-41 allowance pre-flight (#218) so the button label can
   // tell the user which on-chain step they're currently waiting on — an
@@ -412,6 +417,11 @@ export default function CreatePage() {
       await invalidateTokenBalance(queryClient, publicKey, tokenAddr);
 
       setTxHash(hash);
+      // #810 — the notification prompt belongs after this moment of value, not
+      // on the landing page. Only surface it while the flag is still unset.
+      const isFirstStream = !hasCreatedStream();
+      markFirstStreamCreated();
+      if (isFirstStream) setFirstStreamCreated(true);
       try { localStorage.removeItem(DRAFT_KEY); } catch { /* storage is optional */ }
       // #362 — createStream now decodes the confirmed transaction's return
       // value, so we can deep-link straight to the new stream instead of
@@ -441,6 +451,7 @@ export default function CreatePage() {
             <p className="font-mono text-xs text-gray-400 dark:text-gray-500 break-all">{txHash}</p>
             <CopyHashButton hash={txHash} className={`shrink-0 ${styles.shrink0}`} />
           </div>
+          <FirstStreamNotificationPrompt firstStream={firstStreamCreated} />
         </div>
       </div>
     );
