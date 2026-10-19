@@ -55,3 +55,71 @@ export function buildErrorReport(
   if (error.stack) lines.push('', 'Stack trace:', error.stack);
   return lines.join('\n');
 }
+
+export const GITHUB_REPO_ISSUES_URL =
+  'https://github.com/conduit-protocol/streamFi-app/issues/new';
+
+export function buildGitHubIssueBody(
+  error: Error & { digest?: string },
+  context: { url?: string; userAgent?: string } = {},
+): string {
+  const page = context.url ?? 'Root error boundary';
+  const userAgent = context.userAgent ?? 'Unknown';
+  const stack = error.stack || `${error.name}: ${error.message}`;
+
+  return [
+    '## Page / Component',
+    '',
+    page,
+    '',
+    '## Description',
+    '',
+    `An unexpected error occurred: ${error.name}: ${error.message}${
+      error.digest ? ` (digest: ${error.digest})` : ''
+    }`,
+    '',
+    '## Steps to reproduce',
+    '',
+    '1. Navigate to the page',
+    '2. Perform user action',
+    '',
+    '## Expected behaviour',
+    '',
+    'The page renders and functions normally without error.',
+    '',
+    '## Actual behaviour',
+    '',
+    `${error.name}: ${error.message}`,
+    '',
+    '## Environment',
+    '',
+    `- Browser + version: ${userAgent}`,
+    '- Wallet extension + version: N/A',
+    '- Network: testnet / mainnet',
+    `- OS: ${userAgent}`,
+    '',
+    '## Console errors',
+    '',
+    '```',
+    stack,
+    '```',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Generates a pre-filled GitHub issue URL matching the repository template (#814).
+ */
+export function buildGitHubIssueUrl(
+  error: Error & { digest?: string },
+  context: { url?: string; userAgent?: string } = {},
+): string {
+  const title = `[Bug]: ${error.message || 'Unhandled error'}`;
+  const body = buildGitHubIssueBody(error, context);
+  const params = new URLSearchParams({
+    title,
+    body,
+  });
+  return `${GITHUB_REPO_ISSUES_URL}?${params.toString()}`;
+}
+

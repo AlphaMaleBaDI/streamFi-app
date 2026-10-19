@@ -2,7 +2,12 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { buildErrorReport, categorizeError, ERROR_SUGGESTIONS } from '@/lib/error-report';
+import {
+  buildErrorReport,
+  buildGitHubIssueUrl,
+  categorizeError,
+  ERROR_SUGGESTIONS,
+} from '@/lib/error-report';
 
 interface ErrorPageProps {
   error: Error & { digest?: string };
@@ -32,6 +37,11 @@ export default function GlobalError({ error, reset }: ErrorPageProps) {
     }
   }
 
+  const gitHubIssueUrl = buildGitHubIssueUrl(error, {
+    url: typeof window !== 'undefined' ? window.location.href : undefined,
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+  });
+
   return (
     <div className="max-w-5xl mx-auto px-4 py-24 flex flex-col items-center text-center gap-6">
       <p className="text-xs font-semibold tracking-widest uppercase text-gray-400 dark:text-gray-500">
@@ -54,13 +64,21 @@ export default function GlobalError({ error, reset }: ErrorPageProps) {
           ref: {error.digest}
         </p>
       )}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-center gap-3">
         <button onClick={reset} className="btn-secondary text-sm">
           Try again
         </button>
         <button onClick={copyReport} className="btn-secondary text-sm">
           {copied ? 'Copied!' : 'Copy Error Report'}
         </button>
+        <a
+          href={gitHubIssueUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="btn-secondary text-sm"
+        >
+          Report Bug to GitHub
+        </a>
         <Link href="/dashboard" className="btn-primary text-sm">
           Back to Dashboard
         </Link>
