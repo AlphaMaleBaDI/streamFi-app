@@ -2,16 +2,24 @@
 
 import { useEffect } from 'react';
 import { useWallet } from '@/contexts/WalletContext';
-import { flushQueuedTransactions } from '@/lib/offline-transactions';
+import {
+  flushQueuedTransactions,
+  startOnlineSync,
+  stopOnlineSync,
+} from '@/lib/offline-transactions';
 
+/**
+ * Flushes queued offline transactions once on mount and again whenever the
+ * browser fires `online` (#809). The listener itself lives in
+ * `lib/offline-transactions.ts` so it can be unit-tested without rendering.
+ */
 export function OfflineTransactionSync() {
   const { publicKey, signTx } = useWallet();
   useEffect(() => {
     if (!publicKey) return;
-    const flush = () => void flushQueuedTransactions(signTx);
-    window.addEventListener('online', flush);
-    flush();
-    return () => window.removeEventListener('online', flush);
+    startOnlineSync(signTx);
+    void flushQueuedTransactions(signTx);
+    return () => stopOnlineSync();
   }, [publicKey, signTx]);
   return null;
 }
