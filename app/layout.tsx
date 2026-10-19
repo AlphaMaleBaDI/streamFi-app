@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Providers } from '@/components/Providers';
 import { Navbar } from '@/components/Navbar';
 import { CommandPalette } from '@/components/CommandPalette';
@@ -27,6 +27,12 @@ export const metadata: Metadata = {
   },
 };
 
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+};
+
 const themeScript = `(function(){try{var s=localStorage.getItem('streamfi-theme')||localStorage.getItem('theme');var d=s==='dark'||(s!=='light'&&window.matchMedia('(prefers-color-scheme: dark)').matches);var el=document.documentElement;if(d){el.classList.add('dark');el.style.colorScheme='dark';}else{el.classList.remove('dark');el.style.colorScheme='light';}}catch(e){}})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -34,9 +40,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
-      <body className="bg-white dark:bg-gray-950 text-black dark:text-white antialiased">
+      <body
+        className="bg-white dark:bg-gray-950 text-black dark:text-white antialiased pt-[env(safe-area-inset-top)]"
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}
+      >
         <Providers>
           <Navbar />
           <CommandPalette />
