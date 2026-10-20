@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { CircuitBreakerOverlay } from './CircuitBreakerOverlay';
+import { CircuitBreakerOverlay, formatMaintenanceCountdown } from './CircuitBreakerOverlay';
 
 const mockGetCircuitBreakerStates = vi.fn();
 
@@ -150,5 +150,26 @@ describe('CircuitBreakerOverlay', () => {
     });
 
     expect(mockGetCircuitBreakerStates.mock.calls.length).toBe(callsBeforeUnmount);
+  });
+
+  it('displays an estimated maintenance recovery countdown when circuit is open (#817)', () => {
+    mockGetCircuitBreakerStates.mockReturnValue([
+      {
+        scope: WRITE_SCOPE,
+        consecutiveFailures: 3,
+        circuitOpenUntil: Date.now() + 13_000,
+        isOpen: true,
+        remainingMs: 13_000,
+      },
+    ]);
+
+    act(() => {
+      root.render(<CircuitBreakerOverlay />);
+    });
+
+    const countdownEl = container.querySelector('[data-testid="maintenance-countdown"]');
+    expect(countdownEl).not.toBeNull();
+    expect(countdownEl?.textContent).toContain('00:13');
+    expect(formatMaintenanceCountdown(75_000)).toBe('01:15');
   });
 });

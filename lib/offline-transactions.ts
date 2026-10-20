@@ -12,6 +12,8 @@ type NewOfflineTransaction =
   | Omit<Extract<OfflineTransaction, { kind: 'topup' }>, 'id'>;
 
 const KEY = 'conduit-offline-transactions';
+const DEAD_LETTER_KEY = `${KEY}:dead-letter`;
+export const MAX_SYNC_ATTEMPTS = 3;
 
 function read(): OfflineTransaction[] {
   if (typeof localStorage === 'undefined') return [];
@@ -35,9 +37,15 @@ export function queueTransaction(transaction: NewOfflineTransaction): string {
 }
 
 export function queuedTransactions(): OfflineTransaction[] { return read(); }
+export function deadLetterTransactions(): OfflineTransaction[] {
+  if (typeof localStorage === 'undefined') return [];
+  try { return JSON.parse(localStorage.getItem(DEAD_LETTER_KEY) ?? '[]') as OfflineTransaction[]; } catch { return []; }
+}
 
 export async function flushQueuedTransactions(signTx: SignTransaction): Promise<void> {
-  if (!navigator.onLine) return;
+  // Guard SSR and the offline case: there is no point submitting while the
+  // browser reports no connectivity (#809).
+  if (typeof navigator === 'undefined' || navigator.onLine === false) return;
   for (const item of read()) {
     try {
       if (item.kind === 'withdraw') await withdraw(item.publicKey, item.streamAddress, BigInt(item.amount), signTx);
@@ -47,9 +55,65 @@ export async function flushQueuedTransactions(signTx: SignTransaction): Promise<
       notifyQueueChanged();
     } catch (error) {
       console.error('Queued transaction failed:', error);
+      const failed = { ...item, attempts: ((item as OfflineTransaction & { attempts?: number }).attempts ?? 0) + 1, lastError: error instanceof Error ? error.message : String(error) };
+      if (failed.attempts >= MAX_SYNC_ATTEMPTS) {
+        localStorage.setItem(DEAD_LETTER_KEY, JSON.stringify([...deadLetterTransactions(), failed]));
+        write(read().filter((queued) => queued.id !== item.id));
+      }
       break;
     }
   }
+}
+
+// ── Automatic reconnect sync (#809) ─────────────────────────────────────────
+//
+// The signer lives in React state, but the `online` event is owned by the
+// browser. Binding here (instead of inside an effect) keeps the reconnect
+// behaviour in one place, testable without rendering, and lets a single
+// listener survive re-renders. Callers keep the signer fresh by calling
+// `startOnlineSync` whenever it changes and `stopOnlineSync` on unmount.
+
+let onlineSyncSigner: SignTransaction | null = null;
+let onlineSyncHandler: (() => void) | null = null;
+let onlineSyncInFlight = false;
+
+function handleOnlineEvent() {
+  const signTx = onlineSyncSigner;
+  // A burst of `online` events (e.g. flaky cellular signal) must not kick off
+  // overlapping flushes of the same queue.
+  if (!signTx || onlineSyncInFlight) return;
+  onlineSyncInFlight = true;
+  void flushQueuedTransactions(signTx).finally(() => {
+    onlineSyncInFlight = false;
+  });
+}
+
+/**
+ * Retry the offline transaction queue whenever the browser regains
+ * connectivity. Idempotent: repeated calls only refresh the signer.
+ */
+export function startOnlineSync(signTx: SignTransaction): void {
+  onlineSyncSigner = signTx;
+  if (typeof window === 'undefined') return;
+  if (!onlineSyncHandler) {
+    onlineSyncHandler = handleOnlineEvent;
+    window.addEventListener('online', onlineSyncHandler);
+  }
+}
+
+/** Detach the `online` listener and forget the signer. */
+export function stopOnlineSync(): void {
+  onlineSyncSigner = null;
+  if (typeof window !== 'undefined' && onlineSyncHandler) {
+    window.removeEventListener('online', onlineSyncHandler);
+  }
+  onlineSyncHandler = null;
+  onlineSyncInFlight = false;
+}
+
+/** Whether an `online` listener is currently bound (test/diagnostic helper). */
+export function isOnlineSyncActive(): boolean {
+  return onlineSyncHandler !== null;
 }
 
 // ── IndexedDB Storage Adapter for Draft Streams (#753) ─────────────────────────

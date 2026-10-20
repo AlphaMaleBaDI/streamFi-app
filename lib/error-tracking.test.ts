@@ -13,6 +13,8 @@ import {
   captureError,
   withErrorTracking,
   initErrorTracking,
+  scrubSensitiveData,
+  scrubObject,
 } from './error-tracking'
 
 describe('error-tracking', () => {
@@ -183,5 +185,111 @@ describe('error-tracking', () => {
       expect(mockCaptureException).toHaveBeenCalledWith(unhandledReason)
       vi.unstubAllGlobals()
     })
+  })
+})
+
+// ── #808 — secret key & transaction signature scrubbing ──────────────────────
+
+const SECRET_KEY = `S${'A'.repeat(55)}`
+const PUBLIC_KEY = `G${'B'.repeat(55)}`
+const HEX_SIGNATURE = 'a'.repeat(128)
+const BASE64_SIGNATURE = `${'A'.repeat(86)}==`
+
+describe('scrubSensitiveData (#808)', () => {
+  it('redacts Stellar secret keys with [REDACTED]', () => {
+    expect(scrubSensitiveData(`secret=${SECRET_KEY}`)).toBe('secret=[REDACTED]')
+  })
+
+  it('redacts Stellar public keys', () => {
+    expect(scrubSensitiveData(PUBLIC_KEY)).toBe('[REDACTED_PUBLIC_KEY]')
+  })
+
+  it('redacts hex-encoded transaction signatures', () => {
+    expect(scrubSensitiveData(`sig=${HEX_SIGNATURE}`)).toBe('sig=[REDACTED]')
+  })
+
+  it('redacts base64-encoded 64-byte transaction signatures', () => {
+    expect(scrubSensitiveData(`sig:${BASE64_SIGNATURE}`)).toBe('sig:[REDACTED]')
+  })
+
+  it('redacts labelled signature and signed-transaction values of any encoding', () => {
+    expect(scrubSensitiveData('signature: "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA"')).toBe(
+      'signature: [REDACTED]',
+    )
+    expect(scrubSensitiveData('signedTransaction = AAAAdeadbeef1234567890')).toBe(
+      'signedTransaction = [REDACTED]',
+    )
+    expect(scrubSensitiveData('envelope_xdr: AAAABBBB')).toBe('envelope_xdr: [REDACTED]')
+  })
+
+  it('leaves non-sensitive text untouched', () => {
+    const text = 'RPC request timed out after 10000ms for account GCALLER'
+    expect(scrubSensitiveData(text)).toBe(text)
+  })
+
+  it('handles empty and falsy input without throwing', () => {
+    expect(scrubSensitiveData('')).toBe('')
+    expect(scrubSensitiveData(undefined as unknown as string)).toBeFalsy()
+  })
+
+  it('redacts multiple secrets in a single string', () => {
+    const scrubbed = scrubSensitiveData(`a ${SECRET_KEY} b ${HEX_SIGNATURE} c ${PUBLIC_KEY}`)
+    expect(scrubbed).not.toContain(SECRET_KEY)
+    expect(scrubbed).not.toContain(HEX_SIGNATURE)
+    expect(scrubbed).not.toContain(PUBLIC_KEY)
+    expect(scrubbed).toContain('[REDACTED]')
+  })
+})
+
+describe('scrubObject (#808)', () => {
+  it('recursively scrubs strings in nested objects and arrays', () => {
+    const input = {
+      signature: BASE64_SIGNATURE,
+      nested: { secretKey: SECRET_KEY, list: [HEX_SIGNATURE, 'plain'] },
+    }
+    expect(scrubObject(input)).toEqual({
+      signature: '[REDACTED]',
+      nested: { secretKey: '[REDACTED]', list: ['[REDACTED]', 'plain'] },
+    })
+  })
+
+  it('returns non-object values unchanged', () => {
+    expect(scrubObject(42 as unknown as object)).toBe(42)
+    expect(scrubObject(null as unknown as object)).toBeNull()
+  })
+})
+
+describe('captureError scrubbing (#808)', () => {
+  it('never logs a raw secret key to the console fallback', () => {
+    captureError(new Error(`submit failed for key ${SECRET_KEY}`))
+    const loggedMessage = mockConsoleError.mock.calls.at(-1)?.[1]
+    expect(loggedMessage).not.toContain(SECRET_KEY)
+    expect(loggedMessage).toContain('[REDACTED]')
+  })
+
+  it('scrubs signatures out of context and breadcrumb data', async () => {
+    mockWithScope.mockReset()
+    mockCaptureException.mockReset()
+    vi.doMock('@sentry/nextjs', () => ({
+      withScope: mockWithScope,
+      captureException: mockCaptureException,
+    }))
+    process.env.NEXT_PUBLIC_SENTRY_DSN = 'https://test@sentry.io/123'
+    const mod = await vi.importMock<typeof import('./error-tracking')>('./error-tracking')
+    mod.addBreadcrumb({ message: `sig ${HEX_SIGNATURE}`, data: { signature: BASE64_SIGNATURE } })
+    mod.captureError(new Error('boom'), { extra: { signedXdr: HEX_SIGNATURE } })
+
+    expect(mockWithScope).toHaveBeenCalledTimes(1)
+    const scopeFn = mockWithScope.mock.calls[0]?.[0]
+    const scope = { setTag: vi.fn(), setExtra: vi.fn(), addBreadcrumb: vi.fn() }
+    scopeFn!(scope)
+
+    const extraValue = scope.setExtra.mock.calls[0]?.[1]
+    expect(JSON.stringify(extraValue)).not.toContain(HEX_SIGNATURE)
+
+    const crumb = scope.addBreadcrumb.mock.calls[0]?.[0]
+    expect(crumb.message).toBe('sig [REDACTED]')
+    expect(crumb.data).toEqual({ signature: '[REDACTED]' })
+    delete process.env.NEXT_PUBLIC_SENTRY_DSN
   })
 })

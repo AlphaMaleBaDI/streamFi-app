@@ -17,7 +17,7 @@ vi.mock('next/link', () => ({
     React.createElement('a', { href, ...rest }, children),
 }));
 
-import NotFound from '../not-found';
+import NotFound, { FEATURED_PUBLIC_STREAMS } from '../not-found';
 
 function render() {
   const container = document.createElement('div');
@@ -55,6 +55,17 @@ describe('NotFound page', () => {
     const { container, cleanup } = render();
     const link = container.querySelector('a[href="/dashboard"]') as HTMLAnchorElement;
     expect(link.textContent?.toLowerCase()).toContain('dashboard');
+    cleanup();
+  });
+
+  it('renders a 3-item preview grid of trending active streams (#815)', () => {
+    const { container, cleanup } = render();
+    const grid = container.querySelector('[data-testid="trending-streams-grid"]');
+    expect(grid).not.toBeNull();
+    expect(FEATURED_PUBLIC_STREAMS).toHaveLength(3);
+    const items = grid!.querySelectorAll('a[href^="/stream/"]');
+    expect(items.length).toBe(3);
+    expect(container.textContent).toContain('Trending Active Streams');
     cleanup();
   });
 });

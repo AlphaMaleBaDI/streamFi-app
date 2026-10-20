@@ -40,7 +40,10 @@ export function StreamFlowChart({
   height = 200,
 }: StreamFlowChartProps) {
   const [hoverPoint, setHoverPoint] = useState<DataPoint | null>(null);
-  const [sliderPosition, setSliderPosition] = useState<number>(1);
+  // #722 — scrub slider position as a fraction of the chart timeline (0–1).
+  // When non-null, the chart shows the balance at that moment instead of the
+  // live hover point.
+  const [scrubRatio, setScrubRatio] = useState<number | null>(null);
 
   // Client-only wall-clock snapshot to avoid SSR hydration mismatch.
   // Use startTime as the SSR-safe default; the real time is set in
@@ -121,14 +124,6 @@ export function StreamFlowChart({
   }, [startTime, endTime, ratePerSecond, withdrawn, withdrawable, paused, pausedAt, cancelled, graphWidth, graphHeight, padding.left, padding.top, now]);
 
   const { points, maxAmount, start, end } = chartData;
-
-  // Slider maps 0..1 across the time range; derive the point nearest the cursor.
-  const cursorIndex = Math.round(sliderPosition * (points.length - 1));
-  const cursorPoint = points[cursorIndex] ?? null;
-  const cursorTime = start + sliderPosition * (end - start);
-  const cursorAmount = cursorPoint
-    ? cursorPoint.amount
-    : BigInt(Math.floor(Math.max(0, cursorTime - start))) * ratePerSecond;
 
   const pathD = useMemo(() => {
     if (points.length === 0) return '';
@@ -279,21 +274,6 @@ export function StreamFlowChart({
             />
           ))}
 
-          {/* Slider cursor line */}
-          {cursorPoint && (
-            <line
-              x1={cursorPoint.x}
-              y1={padding.top}
-              x2={cursorPoint.x}
-              y2={padding.top + graphHeight}
-              stroke="currentColor"
-              className="text-gray-400 dark:text-gray-500"
-              strokeWidth="1"
-              strokeDasharray="3 3"
-              aria-hidden="true"
-            />
-          )}
-
           {/* X-Axis labels */}
           <text
             x={padding.left}
@@ -314,7 +294,7 @@ export function StreamFlowChart({
         </svg>
 
         {/* Tooltip Overlay */}
-        {hoverPoint && (
+        {hoverPoint && scrubRatio === null && (
           <div
             className="absolute z-20 pointer-events-none rounded-lg bg-gray-900 text-white text-xs px-3 py-1.5 shadow-lg border border-gray-700 font-mono"
             style={{
@@ -334,29 +314,35 @@ export function StreamFlowChart({
             )}
           </div>
         )}
-      </div>
 
-      {/* Withdrawable balance slider (#722) */}
-      <div className="mt-3 space-y-1.5">
-        <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-          <span>{formatTimestamp(Math.round(cursorTime))}</span>
-          <span className="font-mono">
-            {fromStroops(cursorAmount)} {tokenSymbol}
-          </span>
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={sliderPosition}
-          onChange={(e) => setSliderPosition(Number(e.target.value))}
-          className="w-full h-1.5 rounded-full appearance-none bg-gray-200 dark:bg-gray-700 cursor-pointer accent-black dark:accent-white"
-          aria-label="Explore stream balance over time"
-        />
-        <div className="flex justify-between text-[10px] text-gray-400 font-mono">
-          <span>Start</span>
-          <span>End</span>
+        {/* #722 — interactive scrub slider for withdrawable balance */}
+        <div className="mt-3 space-y-1">
+          <div className="flex items-center justify-between text-[10px] text-gray-400 font-mono">
+            <span>{formatTimestamp(start)}</span>
+            {scrubRatio !== null && (
+              <span className="text-black dark:text-white font-semibold">
+                {(() => {
+                  const time = Math.round(start + scrubRatio * (end - start));
+                  const pt = points.reduce((best, p) =>
+                    Math.abs(p.time - time) < Math.abs(best.time - time) ? p : best,
+                  );
+                  return `${formatTimestamp(pt.time)} → ${fromStroops(pt.amount)} ${tokenSymbol}`;
+                })()}
+              </span>
+            )}
+            <span>{formatTimestamp(end)}</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={1000}
+            value={scrubRatio !== null ? Math.round(scrubRatio * 1000) : 500}
+            onChange={(e) => setScrubRatio(Number(e.target.value) / 1000)}
+            onMouseUp={() => setScrubRatio(null)}
+            onTouchEnd={() => setScrubRatio(null)}
+            className="w-full accent-black dark:accent-white cursor-pointer"
+            aria-label="Scrub stream timeline to preview balance"
+          />
         </div>
       </div>
     </div>

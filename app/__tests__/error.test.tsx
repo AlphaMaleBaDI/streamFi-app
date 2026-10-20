@@ -91,4 +91,35 @@ describe('GlobalError page', () => {
     expect(container.textContent).toContain('Something went wrong');
     cleanup();
   });
+
+  it('renders a "Report Bug to GitHub" link pointing to pre-filled issue template (#814)', () => {
+    const err = new Error('RPC connection failed');
+    err.stack = 'Error: RPC connection failed\n    at Horizon.fetch';
+    const { container, cleanup } = render({ error: err, reset: vi.fn() });
+
+    const githubLink = Array.from(container.querySelectorAll('a')).find((a) =>
+      /report bug to github/i.test(a.textContent ?? ''),
+    ) as HTMLAnchorElement | undefined;
+
+    expect(githubLink).not.toBeUndefined();
+    expect(githubLink?.target).toBe('_blank');
+    expect(githubLink?.rel).toContain('noopener');
+
+    const url = new URL(githubLink!.href);
+    expect(url.origin + url.pathname).toBe(
+      'https://github.com/conduit-protocol/streamFi-app/issues/new',
+    );
+    expect(url.searchParams.get('title')).toBe('[Bug]: RPC connection failed');
+
+    const body = url.searchParams.get('body')!;
+    expect(body).toContain('## Page / Component');
+    expect(body).toContain('## Description');
+    expect(body).toContain('RPC connection failed');
+    expect(body).toContain('## Environment');
+    expect(body).toContain('- Browser + version:');
+    expect(body).toContain('## Console errors');
+    expect(body).toContain('at Horizon.fetch');
+
+    cleanup();
+  });
 });

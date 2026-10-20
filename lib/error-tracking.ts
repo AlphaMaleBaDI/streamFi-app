@@ -21,6 +21,12 @@ const MAX_BREADCRUMBS = 20
 
 const SENTRY_DSN = process.env.NEXT_PUBLIC_SENTRY_DSN
 
+/** Wallet cancellations are expected user flow, not actionable failures. */
+export function isUserRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return /user\s*(rejected|denied|declined)|transaction\s*(cancelled|canceled)|request\s*rejected|denied by user/i.test(message)
+}
+
 /**
  * Whether error tracking is enabled (Sentry DSN is configured).
  */
@@ -32,24 +38,53 @@ export const isErrorTrackingEnabled = !!SENTRY_DSN
  */
 export function addBreadcrumb(crumb: ErrorBreadcrumb): void {
   if (!SENTRY_DSN) return
-  breadcrumbs.push(crumb)
+  // Scrub at insertion so a secret can never sit in the in-memory breadcrumb
+  // buffer waiting to be attached to a later error (#808).
+  const clean: ErrorBreadcrumb = {
+    ...crumb,
+    message: scrubSensitiveData(crumb.message),
+  }
+  if (crumb.data) clean.data = scrubObject(crumb.data)
+  breadcrumbs.push(clean)
   if (breadcrumbs.length > MAX_BREADCRUMBS) {
     breadcrumbs = breadcrumbs.slice(-MAX_BREADCRUMBS)
   }
 }
 
-// ── PII & Key Scrubber (#752) ────────────────────────────────────────────────
+// ── PII & Key Scrubber (#752, #808) ──────────────────────────────────────────
+
+const REDACTED = '[REDACTED]';
 
 const STELLAR_PUBLIC_KEY_REGEX = /\bG[A-Z2-7]{55}\b/g;
 const STELLAR_SECRET_KEY_REGEX = /\bS[A-Z2-7]{55}\b/g;
 
+// Transaction signatures are 64-byte ed25519 values. Depending on how the
+// wallet/SDK surfaces them in an error they show up either raw-hex encoded
+// (128 chars) or base64 encoded (86 chars + '==' padding).
+const HEX_TRANSACTION_SIGNATURE_REGEX = /(?<![0-9a-fA-F])[0-9a-fA-F]{128}(?![0-9a-fA-F])/g;
+const BASE64_TRANSACTION_SIGNATURE_REGEX = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{86}==(?![A-Za-z0-9+/=])/g;
+
+// Values explicitly labelled as a signature/secret/envelope — catches encoded
+// blobs that aren't a bare 64-byte signature (e.g. a signed transaction XDR)
+// and `secretKey = "S..."` shapes that also survive the secret-key regex.
+const LABELLED_SECRET_REGEX =
+  /((?:signature|signed[_ -]?(?:xdr|transaction|tx)|envelope[_ -]?xdr|secret(?:[_ -]?key)?|private[_ -]?key)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[A-Za-z0-9+/=_-]{8,})/gi;
+
 /**
- * Scrub sensitive Stellar public and secret keys from strings before telemetry dispatch (#752).
+ * Scrub sensitive Stellar keys and transaction signatures from strings before
+ * telemetry dispatch (#752, #808).
+ *
+ * Replacement order matters: labelled values and secret keys are redacted
+ * before the broader signature patterns so a signature embedded in a
+ * `signature: "…"` field is removed as one unit.
  */
 export function scrubSensitiveData(text: string): string {
   if (!text) return text;
   return text
-    .replace(STELLAR_SECRET_KEY_REGEX, '[REDACTED_SECRET_KEY]')
+    .replace(LABELLED_SECRET_REGEX, `$1${REDACTED}`)
+    .replace(STELLAR_SECRET_KEY_REGEX, REDACTED)
+    .replace(HEX_TRANSACTION_SIGNATURE_REGEX, REDACTED)
+    .replace(BASE64_TRANSACTION_SIGNATURE_REGEX, REDACTED)
     .replace(STELLAR_PUBLIC_KEY_REGEX, '[REDACTED_PUBLIC_KEY]');
 }
 
@@ -78,6 +113,7 @@ export function captureError(
     extra?: Record<string, unknown>
   },
 ): void {
+  if (isUserRejection(error)) return
   const rawErr = error instanceof Error ? error : new Error(String(error))
   const cleanMessage = scrubSensitiveData(rawErr.message)
   const err = rawErr.message === cleanMessage ? rawErr : new Error(cleanMessage)
@@ -99,7 +135,11 @@ export function captureError(
     if (cleanContext?.extra) {
       Object.entries(cleanContext.extra).forEach(([k, v]) => scope.setExtra(k, v))
     }
-    breadcrumbs.forEach(c => scope.addBreadcrumb({ ...c, message: scrubSensitiveData(c.message) }))
+    breadcrumbs.forEach(c => {
+      const payload: ErrorBreadcrumb = { ...c, message: scrubSensitiveData(c.message) }
+      if (c.data) payload.data = scrubObject(c.data)
+      scope.addBreadcrumb(payload)
+    })
     Sentry.captureException(err)
   })
   breadcrumbs = []

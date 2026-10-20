@@ -3,6 +3,9 @@ import {
   queueTransaction,
   queuedTransactions,
   flushQueuedTransactions,
+  startOnlineSync,
+  stopOnlineSync,
+  isOnlineSyncActive,
   type OfflineTransaction,
 } from './offline-transactions';
 import * as streamModule from './stream';
@@ -45,6 +48,7 @@ describe('offline-transactions', () => {
   });
 
   afterEach(() => {
+    stopOnlineSync();
     store.clear();
   });
 
@@ -316,5 +320,102 @@ describe('offline-transactions', () => {
 
       consoleErrorSpy.mockRestore();
     });
+  });
+});
+
+// ── #809 — automatic sync when the browser comes back online ────────────────
+
+describe('offline-transactions — reconnect sync (#809)', () => {
+  const mockSignTx = vi.fn().mockResolvedValue('signed-tx-xdr');
+
+  beforeEach(() => {
+    store.clear();
+    vi.clearAllMocks();
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true, writable: true });
+  });
+
+  afterEach(() => {
+    stopOnlineSync();
+    vi.restoreAllMocks();
+  });
+
+  function queueWithdraw() {
+    return queueTransaction({
+      kind: 'withdraw',
+      publicKey: 'G_SYNC',
+      streamAddress: 'C_SYNC',
+      amount: '1000',
+    });
+  }
+
+  it('flushes the queue when the browser fires online', async () => {
+    vi.mocked(streamModule.withdraw).mockResolvedValue({} as any);
+    queueWithdraw();
+    startOnlineSync(mockSignTx);
+
+    window.dispatchEvent(new Event('online'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(streamModule.withdraw).toHaveBeenCalledTimes(1);
+    expect(queuedTransactions()).toEqual([]);
+  });
+
+  it('binds exactly one online listener across repeated calls', () => {
+    const addSpy = vi.spyOn(window, 'addEventListener');
+    const secondSigner = vi.fn().mockResolvedValue('other-xdr');
+
+    startOnlineSync(mockSignTx);
+    startOnlineSync(secondSigner);
+
+    const onlineRegistrations = addSpy.mock.calls.filter(([type]) => type === 'online');
+    expect(onlineRegistrations).toHaveLength(1);
+    expect(isOnlineSyncActive()).toBe(true);
+  });
+
+  it('does nothing while the browser still reports offline', async () => {
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true, writable: true });
+    queueWithdraw();
+    startOnlineSync(mockSignTx);
+
+    window.dispatchEvent(new Event('online'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(streamModule.withdraw).not.toHaveBeenCalled();
+    expect(queuedTransactions()).toHaveLength(1);
+  });
+
+  it('stops sync after stopOnlineSync removes the listener', async () => {
+    vi.mocked(streamModule.withdraw).mockResolvedValue({} as any);
+    queueWithdraw();
+    startOnlineSync(mockSignTx);
+    stopOnlineSync();
+
+    expect(isOnlineSyncActive()).toBe(false);
+
+    window.dispatchEvent(new Event('online'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(streamModule.withdraw).not.toHaveBeenCalled();
+    expect(queuedTransactions()).toHaveLength(1);
+  });
+
+  it('does not start overlapping flushes for a burst of online events', async () => {
+    let resolveWithdraw: (value: unknown) => void = () => {};
+    vi.mocked(streamModule.withdraw).mockImplementation(
+      () => new Promise((resolve) => { resolveWithdraw = resolve; }) as any,
+    );
+    queueWithdraw();
+    startOnlineSync(mockSignTx);
+
+    window.dispatchEvent(new Event('online'));
+    window.dispatchEvent(new Event('online'));
+
+    // Let the first (and only) flush reach the withdraw call.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(streamModule.withdraw).toHaveBeenCalledTimes(1);
+
+    resolveWithdraw({});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(streamModule.withdraw).toHaveBeenCalledTimes(1);
   });
 });
