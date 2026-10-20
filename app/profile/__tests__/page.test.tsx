@@ -204,4 +204,67 @@ describe("ProfilePage", () => {
     expect(explorerLink?.target).toBe("_blank");
     expect(explorerLink?.rel).toContain("noopener");
   });
+
+  it("renders default blockie avatar and Upload Avatar button when connected (#784)", () => {
+    walletState.connected = true;
+    walletState.publicKey = "GABCDE1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF";
+    walletState.walletName = "Freighter";
+    const container = renderProfilePage();
+
+    expect(container.textContent).toContain("Profile Avatar");
+    expect(container.textContent).toContain("Default Blockie");
+    expect(container.textContent).toContain("Upload Avatar");
+
+    const avatarImg = container.querySelector('[data-testid="profile-avatar-img"]') as HTMLImageElement | null;
+    expect(avatarImg).not.toBeNull();
+    expect(avatarImg?.src).toContain("data:image/svg+xml");
+  });
+
+  it("renders custom IPFS avatar and CID when metadata is present (#784)", () => {
+    const pubKey = "GABCDE1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF";
+    localStorage.setItem(
+      `conduit:profile-meta:${pubKey}`,
+      JSON.stringify({
+        publicKey: pubKey,
+        avatarCid: "bafybeicmockipfsavatar1234567890",
+        avatarUrl: "https://w3s.link/ipfs/bafybeicmockipfsavatar1234567890",
+        updatedAt: Date.now(),
+      })
+    );
+
+    walletState.connected = true;
+    walletState.publicKey = pubKey;
+    walletState.walletName = "Freighter";
+    const container = renderProfilePage();
+
+    expect(container.textContent).toContain("Custom IPFS Avatar");
+    expect(container.textContent).toContain("bafybeicmockipfsavatar1234567890");
+    expect(container.textContent).toContain("Reset to blockie");
+
+    const resetBtn = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.includes("Reset to blockie")
+    );
+    expect(resetBtn).toBeDefined();
+
+    act(() => {
+      resetBtn!.click();
+    });
+
+    expect(container.textContent).toContain("Default Blockie");
+    expect(container.textContent).toContain("Avatar removed. Reset to default blockie.");
+  });
+
+  it("renders Gas Efficiency KPI card displaying lifetime gas savings (#785)", () => {
+    walletState.connected = true;
+    walletState.publicKey = "GABCDE1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF";
+    walletState.walletName = "Freighter";
+    const container = renderProfilePage();
+
+    expect(container.textContent).toContain("Gas Efficiency");
+    const kpiCard = container.querySelector('[data-testid="gas-efficiency-card"]');
+    expect(kpiCard).not.toBeNull();
+    expect(kpiCard?.textContent).toContain("Lifetime Gas Fees Saved");
+    expect(kpiCard?.textContent).toContain("Withdrawals Avoided");
+    expect(kpiCard?.textContent).toContain("Avg Fee per Payout");
+  });
 });

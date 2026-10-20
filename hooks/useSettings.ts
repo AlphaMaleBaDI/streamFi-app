@@ -12,6 +12,12 @@
  */
 
 import { useEffect, useState } from "react";
+import {
+  type NotificationChannelConfig,
+  type NotificationMatrix,
+  DEFAULT_NOTIFICATION_CHANNELS,
+  DEFAULT_NOTIFICATION_MATRIX,
+} from "@/lib/notifications";
 
 export type TimeFormat = "relative" | "absolute";
 
@@ -40,6 +46,10 @@ export interface PublicSettings {
    * (issue #586).
    */
   advancedMode: boolean;
+  notificationChannels: NotificationChannelConfig;
+  notificationMatrix: NotificationMatrix;
+  /** Developer mode reveals raw contract storage keys and XDR payloads in confirmation dialogs (#787). */
+  developerMode: boolean;
 }
 
 const STORAGE_KEY = "conduit:settings";
@@ -48,6 +58,9 @@ const DEFAULTS: PublicSettings = {
   timeFormat: "absolute",
   autoRefreshInterval: 0,
   advancedMode: false,
+  notificationChannels: DEFAULT_NOTIFICATION_CHANNELS,
+  notificationMatrix: DEFAULT_NOTIFICATION_MATRIX,
+  developerMode: false,
 };
 
 function readFromStorage(): PublicSettings {
@@ -64,6 +77,9 @@ function readFromStorage(): PublicSettings {
         ? (parsed.autoRefreshInterval as RefreshIntervalSeconds)
         : 0,
       advancedMode: parsed.advancedMode === true,
+      notificationChannels: parsed.notificationChannels ?? DEFAULT_NOTIFICATION_CHANNELS,
+      notificationMatrix: parsed.notificationMatrix ?? DEFAULT_NOTIFICATION_MATRIX,
+      developerMode: parsed.developerMode === true,
     };
   } catch {
     return DEFAULTS;

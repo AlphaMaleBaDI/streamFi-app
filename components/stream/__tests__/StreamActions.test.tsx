@@ -366,4 +366,18 @@ describe('StreamActions — top-up flow', () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(mockTopUp).not.toHaveBeenCalled();
   });
+
+  it('displays raw contract storage keys and XDR payload in confirmation dialog when developerMode is enabled (#787)', async () => {
+    localStorage.setItem('conduit:settings', JSON.stringify({ developerMode: true }));
+    render(<StreamActions {...baseProps} isSender status="active" />);
+    await click(button('Cancel')!);
+
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(container.textContent).toContain('Developer Mode: Raw Contract Data & XDR');
+    expect(container.textContent).toContain('Raw Contract Storage Key (LedgerKey XDR)');
+    expect(container.textContent).toContain('Raw Invocation XDR');
+
+    const inspector = container.querySelector('[data-testid="developer-mode-inspector"]');
+    expect(inspector).not.toBeNull();
+  });
 });
