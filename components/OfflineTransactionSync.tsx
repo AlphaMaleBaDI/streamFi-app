@@ -2,14 +2,15 @@
 
 import { useEffect, useState } from 'react';
 import { useWallet } from '@/contexts/WalletContext';
-import { flushQueuedTransactions, queuedTransactions } from '@/lib/offline-transactions';
+import {
+  flushQueuedTransactions,
+  queuedTransactions,
+  startOnlineSync,
+  stopOnlineSync,
+} from '@/lib/offline-transactions';
 
 /**
- * #739 — Queue failed transactions and prompt retry upon reconnect.
- *
- * When a transaction fails due to network issues, it's queued and the user
- * is prompted to retry when the connection is restored. Also tracks queued
- * count and shows a notification when transactions are flushed.
+ * #739, #809 — Queue failed transactions, retry on reconnect, and notify user.
  */
 export function OfflineTransactionSync() {
   const { publicKey, signTx } = useWallet();
@@ -19,16 +20,22 @@ export function OfflineTransactionSync() {
   useEffect(() => {
     if (!publicKey) return;
 
-    const updateCount = () => setQueuedCount(queuedTransactions().length);
+    startOnlineSync(signTx);
+    void flushQueuedTransactions(signTx);
+
+    const updateCount = () => {
+      if (typeof queuedTransactions === 'function') {
+        setQueuedCount(queuedTransactions()?.length ?? 0);
+      }
+    };
 
     const flush = async () => {
-      const pending = queuedTransactions().length;
+      const pending = typeof queuedTransactions === 'function' ? queuedTransactions()?.length ?? 0 : 0;
       if (pending > 0) {
         setShowRetryPrompt(true);
       }
       await flushQueuedTransactions(signTx);
       updateCount();
-      // Hide prompt after successful flush
       setTimeout(() => setShowRetryPrompt(false), 3000);
     };
 
@@ -37,6 +44,7 @@ export function OfflineTransactionSync() {
     updateCount();
 
     return () => {
+      stopOnlineSync();
       window.removeEventListener('online', flush);
       window.removeEventListener('offline-transactions-changed', updateCount);
     };
