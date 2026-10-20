@@ -282,6 +282,28 @@ export default function CreatePage() {
     ? wouldRateTruncateToZero(deposit, tokenDecimals, duration)
     : false;
 
+  // Fee preview (#721) — network base fee, base reserve, and protocol bps.
+  const PROTOCOL_FEE_BPS = 50; // 0.5%
+  const NETWORK_BASE_FEE_STROOPS = 100; // Stellar BASE_FEE
+  const NETWORK_BASE_RESERVE_XLM = '0.5000000';
+
+  const feeEstimate = useMemo(() => {
+    const depositStroops = deposit
+      ? (() => { try { return toStroops(deposit, tokenDecimals); } catch { return 0n; } })()
+      : 0n;
+    const protocolFeeStroops = (depositStroops * BigInt(PROTOCOL_FEE_BPS)) / 10_000n;
+    const protocolFeeDisplay = fromStroops(protocolFeeStroops, tokenDecimals);
+    const networkFee = NETWORK_BASE_FEE_STROOPS * 2; // create + approve ops
+    return {
+      networkFee,
+      baseReserve: NETWORK_BASE_RESERVE_XLM,
+      protocolFee: protocolFeeDisplay,
+      totalDisplay: deposit
+        ? `${deposit} ${token} + ~${networkFee} stroops network fee`
+        : '—',
+    };
+  }, [deposit, token, tokenDecimals]);
+
   async function onSubmit(data: FormValues) {
     if (!publicKey) {
       setError('Connect your wallet first.');
@@ -652,6 +674,43 @@ export default function CreatePage() {
                   Deposit too small for this duration — increase the amount or shorten the duration.
                 </p>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Fee preview (#721) */}
+        {deposit && (
+          <div className={`card bg-gray-50 dark:bg-gray-800 border-gray-100 dark:border-gray-700 ${styles.flexRowStart}`}>
+            <div className="w-full space-y-1.5">
+              <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                Fee breakdown
+              </p>
+              <div className="space-y-1 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-gray-500 dark:text-gray-400">Network base fee</span>
+                  <span className="font-mono text-black dark:text-white">
+                    {feeEstimate.networkFee} stroops
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500 dark:text-gray-400">Network base reserve</span>
+                  <span className="font-mono text-black dark:text-white">
+                    {feeEstimate.baseReserve} XLM
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500 dark:text-gray-400">Protocol fee ({PROTOCOL_FEE_BPS} bps)</span>
+                  <span className="font-mono text-black dark:text-white">
+                    {feeEstimate.protocolFee} {token}
+                  </span>
+                </div>
+                <div className="flex justify-between border-t border-gray-200 dark:border-gray-700 pt-1.5">
+                  <span className="text-gray-500 dark:text-gray-400 font-semibold">Estimated total cost</span>
+                  <span className="font-mono font-semibold text-black dark:text-white">
+                    {feeEstimate.totalDisplay}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
         )}

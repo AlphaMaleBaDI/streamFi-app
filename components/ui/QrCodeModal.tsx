@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import { Download } from 'lucide-react';
+import { Download, Copy, Check, Link2 } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 
 export type ErrorCorrectionLevel = 'L' | 'M' | 'Q' | 'H';
@@ -23,7 +23,17 @@ export function QrCodeModal({
   errorCorrectionLevel = 'H',
 }: QrCodeModalProps) {
   const [qrDataUrl, setQrDataUrl] = useState('');
+  const [copied, setCopied] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const shortlink = useMemo(() => {
+    try {
+      const url = new URL(value);
+      return `${url.origin}${url.pathname}`;
+    } catch {
+      return value;
+    }
+  }, [value]);
 
   const levelLabel = useMemo(() => errorCorrectionLevel, [errorCorrectionLevel]);
 
@@ -66,6 +76,16 @@ export function QrCodeModal({
     link.click();
   };
 
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(shortlink);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard may be unavailable in some contexts
+    }
+  };
+
   return (
     <Modal title={title} onClose={onClose} size="max-w-sm">
       <div className="space-y-4">
@@ -85,9 +105,27 @@ export function QrCodeModal({
           <canvas ref={canvasRef} className="h-56 w-56 rounded-lg bg-white" aria-label="QR code" />
         </div>
 
-        <p className="break-all text-center text-[11px] text-gray-500 dark:text-gray-400">
-          {value}
-        </p>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 flex-1 rounded border border-gray-200 dark:border-gray-700 px-2.5 py-1.5 min-w-0">
+            <Link2 className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+            <span className="text-[11px] font-mono text-gray-600 dark:text-gray-300 truncate" title={shortlink}>
+              {shortlink}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800 shrink-0"
+            aria-label="Copy link"
+          >
+            {copied ? (
+              <Check className="h-3.5 w-3.5 text-green-600" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
       </div>
     </Modal>
   );

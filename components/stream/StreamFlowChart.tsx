@@ -40,6 +40,7 @@ export function StreamFlowChart({
   height = 200,
 }: StreamFlowChartProps) {
   const [hoverPoint, setHoverPoint] = useState<DataPoint | null>(null);
+  const [sliderPosition, setSliderPosition] = useState<number>(1);
 
   // Client-only wall-clock snapshot to avoid SSR hydration mismatch.
   // Use startTime as the SSR-safe default; the real time is set in
@@ -120,6 +121,14 @@ export function StreamFlowChart({
   }, [startTime, endTime, ratePerSecond, withdrawn, withdrawable, paused, pausedAt, cancelled, graphWidth, graphHeight, padding.left, padding.top, now]);
 
   const { points, maxAmount, start, end } = chartData;
+
+  // Slider maps 0..1 across the time range; derive the point nearest the cursor.
+  const cursorIndex = Math.round(sliderPosition * (points.length - 1));
+  const cursorPoint = points[cursorIndex] ?? null;
+  const cursorTime = start + sliderPosition * (end - start);
+  const cursorAmount = cursorPoint
+    ? cursorPoint.amount
+    : BigInt(Math.floor(Math.max(0, cursorTime - start))) * ratePerSecond;
 
   const pathD = useMemo(() => {
     if (points.length === 0) return '';
@@ -270,6 +279,21 @@ export function StreamFlowChart({
             />
           ))}
 
+          {/* Slider cursor line */}
+          {cursorPoint && (
+            <line
+              x1={cursorPoint.x}
+              y1={padding.top}
+              x2={cursorPoint.x}
+              y2={padding.top + graphHeight}
+              stroke="currentColor"
+              className="text-gray-400 dark:text-gray-500"
+              strokeWidth="1"
+              strokeDasharray="3 3"
+              aria-hidden="true"
+            />
+          )}
+
           {/* X-Axis labels */}
           <text
             x={padding.left}
@@ -310,6 +334,30 @@ export function StreamFlowChart({
             )}
           </div>
         )}
+      </div>
+
+      {/* Withdrawable balance slider (#722) */}
+      <div className="mt-3 space-y-1.5">
+        <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+          <span>{formatTimestamp(Math.round(cursorTime))}</span>
+          <span className="font-mono">
+            {fromStroops(cursorAmount)} {tokenSymbol}
+          </span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={sliderPosition}
+          onChange={(e) => setSliderPosition(Number(e.target.value))}
+          className="w-full h-1.5 rounded-full appearance-none bg-gray-200 dark:bg-gray-700 cursor-pointer accent-black dark:accent-white"
+          aria-label="Explore stream balance over time"
+        />
+        <div className="flex justify-between text-[10px] text-gray-400 font-mono">
+          <span>Start</span>
+          <span>End</span>
+        </div>
       </div>
     </div>
   );
