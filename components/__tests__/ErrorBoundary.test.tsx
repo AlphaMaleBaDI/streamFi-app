@@ -1,7 +1,7 @@
 import React, { act } from 'react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { ErrorBoundary } from '../ErrorBoundary';
+import { ErrorBoundary, CRASH_TELEMETRY_ENDPOINT } from '../ErrorBoundary';
 
 /**
  * Regression tests for issue #92.
@@ -212,5 +212,27 @@ describe('ErrorBoundary (issue #92 regression)', () => {
     removeSpy.mockRestore();
     // Re-create a root so afterEach unmount is a no-op-safe call.
     root = createRoot(container);
+  });
+
+  it('forwards caught render errors to the telemetry crash endpoint (#816)', () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
+    act(() => {
+      root.render(
+        React.createElement(
+          ErrorBoundary,
+          null,
+          React.createElement(Bomb, { shouldThrow: true }),
+        ),
+      );
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      CRASH_TELEMETRY_ENDPOINT,
+      expect.objectContaining({
+        method: 'POST',
+        keepalive: true,
+      }),
+    );
+    fetchSpy.mockRestore();
   });
 });
