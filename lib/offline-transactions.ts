@@ -12,6 +12,8 @@ type NewOfflineTransaction =
   | Omit<Extract<OfflineTransaction, { kind: 'topup' }>, 'id'>;
 
 const KEY = 'conduit-offline-transactions';
+const DEAD_LETTER_KEY = `${KEY}:dead-letter`;
+export const MAX_SYNC_ATTEMPTS = 3;
 
 function read(): OfflineTransaction[] {
   if (typeof localStorage === 'undefined') return [];
@@ -35,6 +37,10 @@ export function queueTransaction(transaction: NewOfflineTransaction): string {
 }
 
 export function queuedTransactions(): OfflineTransaction[] { return read(); }
+export function deadLetterTransactions(): OfflineTransaction[] {
+  if (typeof localStorage === 'undefined') return [];
+  try { return JSON.parse(localStorage.getItem(DEAD_LETTER_KEY) ?? '[]') as OfflineTransaction[]; } catch { return []; }
+}
 
 export async function flushQueuedTransactions(signTx: SignTransaction): Promise<void> {
   if (!navigator.onLine) return;
@@ -47,6 +53,11 @@ export async function flushQueuedTransactions(signTx: SignTransaction): Promise<
       notifyQueueChanged();
     } catch (error) {
       console.error('Queued transaction failed:', error);
+      const failed = { ...item, attempts: ((item as OfflineTransaction & { attempts?: number }).attempts ?? 0) + 1, lastError: error instanceof Error ? error.message : String(error) };
+      if (failed.attempts >= MAX_SYNC_ATTEMPTS) {
+        localStorage.setItem(DEAD_LETTER_KEY, JSON.stringify([...deadLetterTransactions(), failed]));
+        write(read().filter((queued) => queued.id !== item.id));
+      }
       break;
     }
   }

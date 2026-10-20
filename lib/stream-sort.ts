@@ -2,6 +2,7 @@ import type { StreamInfo } from "./stream";
 
 /** Sort options for the /streams list (#548). */
 export type SortKey = "default" | "amount-asc" | "amount-desc" | "end-asc" | "end-desc";
+export interface StreamSortCriterion<T> { key: keyof T; direction?: "asc" | "desc"; }
 
 export const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "default", label: "Default order" },
@@ -55,11 +56,41 @@ function getComparator<T extends { info: Pick<StreamInfo, "ratePerSecond" | "end
   return comparator;
 }
 
-export function sortStreams<T extends { info: Pick<StreamInfo, "ratePerSecond" | "endTime"> }>(
+function sortStreamsByKey<T extends { info: Pick<StreamInfo, "ratePerSecond" | "endTime"> }>(
   rows: T[],
   sort: SortKey,
 ): T[] {
   if (sort === "default" || rows.length <= 1) return rows;
   const comparator = getComparator<T>(sort);
   return [...rows].sort(comparator);
+}
+
+/** Stable multi-criteria sorting; criteria are evaluated in declaration order. */
+export function sortStreamsByCriteria<T extends object>(rows: readonly T[], criteria: readonly StreamSortCriterion<T>[]): T[] {
+  return rows.map((value, index) => ({ value, index })).sort((a, b) => {
+    for (const criterion of criteria) {
+      const left = a.value[criterion.key];
+      const right = b.value[criterion.key];
+      if (left === right) continue;
+      const direction = criterion.direction === "desc" ? -1 : 1;
+      if (left == null) return -direction;
+      if (right == null) return direction;
+      return (left < right ? -1 : 1) * direction;
+    }
+    return a.index - b.index;
+  }).map(({ value }) => value);
+}
+
+export function sortStreams<T extends { info: Pick<StreamInfo, "ratePerSecond" | "endTime"> }>(
+  rows: T[], sort: SortKey,
+): T[];
+export function sortStreams<T extends object>(
+  rows: readonly T[], criteria: readonly StreamSortCriterion<T>[],
+): T[];
+export function sortStreams<T extends { info: Pick<StreamInfo, "ratePerSecond" | "endTime"> }>(
+  rows: readonly T[], sortOrCriteria: SortKey | readonly StreamSortCriterion<T>[],
+): T[] {
+  return Array.isArray(sortOrCriteria)
+    ? sortStreamsByCriteria(rows, sortOrCriteria)
+    : sortStreamsByKey([...rows], sortOrCriteria);
 }
