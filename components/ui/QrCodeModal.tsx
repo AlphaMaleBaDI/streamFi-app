@@ -2,30 +2,46 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import { Download } from 'lucide-react';
+import { Download, Copy, Check, Link2 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { Modal } from '@/components/ui/Modal';
+import { copyToClipboard } from '@/lib/clipboard';
 
 export type ErrorCorrectionLevel = 'L' | 'M' | 'Q' | 'H';
 
 interface QrCodeModalProps {
-  isOpen: boolean;
+  isOpen?: boolean;
   value: string;
   title?: string;
   onClose: () => void;
   errorCorrectionLevel?: ErrorCorrectionLevel;
 }
 
+/** Shorten a URL for display: keep origin + last path segment. */
+function shortlink(url: string): string {
+  try {
+    const u = new URL(url);
+    const segments = u.pathname.split('/').filter(Boolean);
+    const last = segments[segments.length - 1] ?? '';
+    return `${u.origin}/…/${last}`;
+  } catch {
+    return url.length > 60 ? `${url.slice(0, 57)}…` : url;
+  }
+}
+
 export function QrCodeModal({
-  isOpen,
+  isOpen = true,
   value,
   title = 'QR code',
   onClose,
   errorCorrectionLevel = 'H',
 }: QrCodeModalProps) {
   const [qrDataUrl, setQrDataUrl] = useState('');
+  const [copied, setCopied] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const levelLabel = useMemo(() => errorCorrectionLevel, [errorCorrectionLevel]);
+  const displayLink = useMemo(() => shortlink(value), [value]);
 
   useEffect(() => {
     if (!isOpen || !value) return;
@@ -66,6 +82,17 @@ export function QrCodeModal({
     link.click();
   };
 
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(value);
+    if (ok) {
+      setCopied(true);
+      toast.success('Link copied to clipboard');
+      setTimeout(() => setCopied(false), 2000);
+    } else {
+      toast.error('Failed to copy link');
+    }
+  };
+
   return (
     <Modal title={title} onClose={onClose} size="max-w-sm">
       <div className="space-y-4">
@@ -85,9 +112,22 @@ export function QrCodeModal({
           <canvas ref={canvasRef} className="h-56 w-56 rounded-lg bg-white" aria-label="QR code" />
         </div>
 
-        <p className="break-all text-center text-[11px] text-gray-500 dark:text-gray-400">
-          {value}
-        </p>
+        {/* #723 — shortlink + one-click copy */}
+        <div className="flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-2">
+          <Link2 className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+          <p className="flex-1 truncate text-xs font-mono text-gray-600 dark:text-gray-300">
+            {displayLink}
+          </p>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="inline-flex items-center gap-1 rounded bg-black dark:bg-white px-2.5 py-1 text-xs font-medium text-white dark:text-black hover:opacity-80 transition-opacity"
+            aria-label="Copy share link"
+          >
+            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
       </div>
     </Modal>
   );
