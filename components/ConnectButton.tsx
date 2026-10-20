@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useWallet }         from '@/contexts/WalletContext';
-import { truncateAddress }   from '@/lib/format';
+import { CopyAddress }       from '@/components/ui/CopyAddress';
 import { LogOut }            from 'lucide-react';
 import { MultiWalletModal }  from '@/components/MultiWalletModal';
 
@@ -113,8 +113,8 @@ export function ConnectButton() {
   if (connected && publicKey) {
     return (
       <div className="flex items-center gap-2">
-        <span className="hidden sm:block text-xs text-gray-500 dark:text-gray-400 font-mono">
-          {truncateAddress(publicKey)}
+        <span className="hidden sm:block text-xs text-gray-500 dark:text-gray-400">
+          <CopyAddress address={publicKey} />
         </span>
         <button
           onClick={handleDisconnect}

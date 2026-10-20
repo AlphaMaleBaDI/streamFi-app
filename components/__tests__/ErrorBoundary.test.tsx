@@ -1,7 +1,6 @@
-import React from 'react';
+import React, { act } from 'react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { act } from 'react';
 import { ErrorBoundary } from '../ErrorBoundary';
 
 /**
@@ -93,6 +92,24 @@ describe('ErrorBoundary (issue #92 regression)', () => {
     // This is the core regression: with the bug present the breaker never trips.
     triggerErrors(MAX_ERROR_COUNT);
     expect(container.textContent).toContain('Too many errors');
+  });
+
+  it('does not schedule the breaker reset as a render side effect (#421)', () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const boundary = new ErrorBoundary({});
+
+    boundary.state = {
+      hasError: true,
+      error: new Error('boom'),
+      errorCount: MAX_ERROR_COUNT,
+    };
+
+    boundary.render();
+
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+    vi.useRealTimers();
   });
 
   it('preserves errorCount and trips the circuit breaker when retrying via a custom fallback', () => {

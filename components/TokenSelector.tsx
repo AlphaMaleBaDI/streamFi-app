@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { tokenByAddress, type TokenMeta } from '@/lib/tokens';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { tokenByAddress, getTokens, networksForAddress, type TokenMeta } from '@/lib/tokens';
 
 /**
  * Stellar Soroban contract addresses are base32-encoded with the RFC 4648
@@ -55,6 +55,33 @@ export function TokenSelector({
   const [status, setStatus]   = useState<ResolveStatus>('idle');
   const [token, setToken]     = useState<TokenMeta | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Networks (other than the current one) on which an otherwise-unknown
+  // address IS a known token — so the message can point the user there (#429).
+  const [otherNetworks, setOtherNetworks] = useState<Array<'mainnet' | 'testnet'>>([]);
+
+  // ── Token search filtering (#653) ─────────────────────────────────────────
+  // Debounced search across symbol, name, and 56-char contract address so
+  // custom/imported tokens are findable as the known-token list grows.
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const filteredTokens = useMemo<TokenMeta[]>(() => {
+    const q = debouncedSearch.trim().toLowerCase();
+    if (!q) return [];
+    return getTokens(network).filter(t => {
+      if (t.symbol.toLowerCase().includes(q)) return true;
+      if (t.name.toLowerCase().includes(q)) return true;
+      if (t.address?.toLowerCase().includes(q)) return true;
+      return false;
+    });
+  }, [debouncedSearch, network]);
+
+  const showSearchResults = debouncedSearch.trim().length > 0;
 
   // Ref to the AbortController for the current in-flight metadata lookup.
   // Replaced on every new lookup so the previous one can be cancelled.
@@ -70,6 +97,7 @@ export function TokenSelector({
       setStatus('loading');
       setToken(null);
       setErrorMsg(null);
+      setOtherNetworks([]);
 
       try {
         // Simulate async resolution — allows a future upgrade to a real RPC
@@ -84,6 +112,11 @@ export function TokenSelector({
 
         setToken(found);
         setStatus(found ? 'resolved' : 'unknown');
+        if (!found) {
+          setOtherNetworks(
+            networksForAddress(address).filter(n => n !== network),
+          );
+        }
         onTokenResolved?.(found);
       } catch (err: unknown) {
         if (controller.signal.aborted) return;
@@ -103,6 +136,7 @@ export function TokenSelector({
       setStatus('idle');
       setToken(null);
       setErrorMsg(null);
+      setOtherNetworks([]);
       if (value.length > 0) {
         // Non-empty but invalid — the error state is shown by the validation
         // message below rather than as a resolve error.
@@ -177,7 +211,10 @@ export function TokenSelector({
 
       {!showValidationError && status === 'unknown' && (
         <p className="text-xs text-gray-400 mt-1" role="status" aria-live="polite">
-          Contract address not in the known token list — it may still be valid on-chain.
+          {otherNetworks.length > 0
+            ? `This contract is a known token on ${otherNetworks.join(' and ')}, but not on ` +
+              `${network}. Switch networks or choose a different token.`
+            : 'Contract address not in the known token list — it may still be valid on-chain.'}
         </p>
       )}
 
@@ -190,6 +227,68 @@ export function TokenSelector({
           {errorMsg ?? 'Could not resolve token metadata. Please try again.'}
         </p>
       )}
+
+      {/* Token search filter (#653) — debounced filtering across symbol,
+          name, and 56-char contract address. The result list only renders
+          while a search query is present so the default view is unchanged. */}
+      <div className="pt-2">
+        <label
+          htmlFor="token-selector-search"
+          className="block text-xs font-semibold dark:text-white"
+        >
+          Search tokens
+        </label>
+        <input
+          id="token-selector-search"
+          type="search"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          disabled={disabled}
+          placeholder="Search by symbol, name, or address…"
+          aria-label="Search tokens"
+          autoComplete="off"
+          spellCheck={false}
+          className="input w-full mt-1"
+        />
+        {showSearchResults && (
+          <div
+            role="listbox"
+            aria-label="Matching tokens"
+            className="mt-1 max-h-48 overflow-y-auto rounded border border-gray-200 dark:border-gray-700"
+          >
+            {filteredTokens.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-gray-400" role="status">
+                No tokens match “{debouncedSearch.trim()}”.
+              </p>
+            ) : (
+              filteredTokens.map(t => {
+                const isSelected = !!t.address && t.address === value;
+                return (
+                  <button
+                    key={t.address ?? t.symbol}
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    disabled={disabled || !t.address}
+                    onClick={() => {
+                      if (t.address) onChange(t.address);
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-40"
+                  >
+                    <span className="font-semibold">{t.symbol}</span>
+                    <span className="text-gray-500 dark:text-gray-400"> — {t.name}</span>
+                    {t.address && (
+                      <span className="block font-mono text-[10px] text-gray-400 truncate">
+                        {t.address}
+                      </span>
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

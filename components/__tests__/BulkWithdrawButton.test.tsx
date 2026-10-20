@@ -1,7 +1,6 @@
-import React from 'react';
+import React, { act } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createRoot } from 'react-dom/client';
-import { act } from 'react';
 import { BulkWithdrawButton } from '../stream/BulkWithdrawButton';
 
 vi.mock('@/contexts/WalletContext', () => ({
@@ -24,6 +23,11 @@ function makeStream(id: string, withdrawable: bigint) {
                 : 'CABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGCK3';
   return { id, address, info: { withdrawable } };
 }
+
+const confirmBtn = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll('button')).find(
+    (b) => b.textContent === 'Confirm withdrawal',
+  ) as HTMLButtonElement;
 
 describe('BulkWithdrawButton', () => {
   beforeEach(() => {
@@ -64,8 +68,11 @@ describe('BulkWithdrawButton', () => {
     });
 
     const button = container.querySelector('button')!;
-    await act(async () => {
+    act(() => {
       button.click();
+    });
+    await act(async () => {
+      confirmBtn(container).click();
     });
 
     expect(mockWithdraw).toHaveBeenCalledTimes(1);
@@ -100,8 +107,11 @@ describe('BulkWithdrawButton', () => {
     });
 
     const button = container.querySelector('button')!;
-    await act(async () => {
+    act(() => {
       button.click();
+    });
+    await act(async () => {
+      confirmBtn(container).click();
     });
 
     expect(mockWithdraw).toHaveBeenCalledTimes(1);
@@ -137,6 +147,7 @@ describe('BulkWithdrawButton', () => {
       button.click();
     });
 
+    expect(button.disabled).toBe(true);
     expect(mockWithdraw).not.toHaveBeenCalled();
 
     act(() => {
@@ -172,9 +183,12 @@ describe('BulkWithdrawButton', () => {
     });
 
     const button = container.querySelector('button')!;
+    act(() => {
+      button.click();
+    });
     let clickPromise: Promise<void>;
     act(() => {
-      clickPromise = (async () => { button.click(); })();
+      clickPromise = (async () => { confirmBtn(container).click(); })();
     });
 
     act(() => {
@@ -246,8 +260,11 @@ describe('BulkWithdrawButton', () => {
 
     const button = container.querySelector('button')!;
 
-    await act(async () => {
+    act(() => {
       button.click();
+    });
+    await act(async () => {
+      confirmBtn(container).click();
       await new Promise((r) => setTimeout(r, 500));
     });
 
@@ -295,8 +312,11 @@ describe('BulkWithdrawButton', () => {
 
     const button = container.querySelector('button')!;
 
-    await act(async () => {
+    act(() => {
       button.click();
+    });
+    await act(async () => {
+      confirmBtn(container).click();
       await new Promise((r) => setTimeout(r, 500));
     });
 
