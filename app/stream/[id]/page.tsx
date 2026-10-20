@@ -700,13 +700,12 @@ export default function StreamPage() {
       )}
 
       {/* Share stream claim-link QR modal (#688) */}
-      {shareOpen && (
-        <QrCodeModal
-          value={claimUrl}
-          title={`Share Stream #${id}`}
-          onClose={() => setShareOpen(false)}
-        />
-      )}
+      <QrCodeModal
+        isOpen={shareOpen}
+        value={claimUrl}
+        title={`Share Stream #${id}`}
+        onClose={() => setShareOpen(false)}
+      />
     </div>
   );
 }
