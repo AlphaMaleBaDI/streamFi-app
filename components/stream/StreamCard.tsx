@@ -8,6 +8,7 @@ import { fromStroops } from "@/lib/format";
 import { CopyAddress } from "@/components/ui/CopyAddress";
 import { getStreamNote } from "@/lib/stream-notes-storage";
 import { useSettings } from "@/hooks/useSettings";
+import styles from "./StreamCard.module.css";
 
 interface StreamCardProps {
   id: string;
@@ -105,7 +106,10 @@ export function StreamCard({
           )}
         </div>
 
-        <div className="shrink-0">
+        <div className="shrink-0 flex items-center gap-1.5">
+          {status === "active" && (
+            <span className={`inline-block w-2 h-2 bg-green-500 rounded-full ${styles.pulse}`} />
+          )}
           <Badge status={status} />
         </div>
       </div>

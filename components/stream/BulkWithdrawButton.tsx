@@ -157,17 +157,27 @@ export function BulkWithdrawButton({
     }
   }, [publicKey, isProcessing, withdrawableStreams, signTx, maxConcurrency, onComplete]);
 
+  const hasNoClaimable = withdrawableStreams.length === 0 && activeStreams.length > 0;
+
   return (
     <div className="space-y-2">
-      <Button
-        onClick={() => setConfirmOpen(true)}
-        disabled={isProcessing || withdrawableStreams.length === 0}
-        className="w-full mt-4"
-      >
-        {isProcessing
-          ? `Processing ${progress.done}/${progress.total}...`
-          : 'Withdraw All Available'}
-      </Button>
+      <div className="relative group">
+        <Button
+          onClick={() => setConfirmOpen(true)}
+          disabled={isProcessing || withdrawableStreams.length === 0}
+          className="w-full mt-4"
+        >
+          {isProcessing
+            ? `Processing ${progress.done}/${progress.total}...`
+            : 'Withdraw All Available'}
+        </Button>
+
+        {hasNoClaimable && (
+          <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap bg-gray-900 dark:bg-gray-100 text-white dark:text-black text-xs px-2 py-1 rounded z-50">
+            No claimable funds accrued yet
+          </div>
+        )}
+      </div>
 
       {confirmOpen && !isProcessing && (
         <Modal
