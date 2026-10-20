@@ -3,10 +3,12 @@
 import { useEffect, useState } from 'react';
 import Link                 from 'next/link';
 import { usePathname }      from 'next/navigation';
-import { Menu, X }          from 'lucide-react';
+import { Menu, X, Bell }    from 'lucide-react';
 import { ConnectButton }    from '@/components/ConnectButton';
 import { ThemeToggle }      from '@/components/ThemeToggle';
 import { ErrorBoundary }    from '@/components/ErrorBoundary';
+import { NetworkBadge }     from '@/components/NetworkBadge';
+import { NotificationBell } from '@/components/NotificationBell';
 
 const NAV = [
   { href: '/streams',      label: 'Streams'    },
@@ -77,6 +79,8 @@ export function Navbar() {
               </button>
             )}
           >
+            <NetworkBadge />
+            <NotificationBell />
             <ThemeToggle />
             <ConnectButton />
           </ErrorBoundary>
