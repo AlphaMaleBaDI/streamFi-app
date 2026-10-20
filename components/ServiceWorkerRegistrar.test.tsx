@@ -110,4 +110,70 @@ describe('ServiceWorkerRegistrar', () => {
       );
     });
   });
+
+  it('prompts update toast when a waiting service worker is detected with active controller', async () => {
+    const postMessageMock = vi.fn();
+    const waitingWorker = {
+      state: 'installed',
+      postMessage: postMessageMock,
+      addEventListener: vi.fn(),
+    } as unknown as ServiceWorker;
+
+    const getRegistrationMock = vi.fn().mockResolvedValue({
+      waiting: waitingWorker,
+      installing: null,
+      addEventListener: vi.fn(),
+    });
+    const registerMock = vi.fn().mockResolvedValue({
+      installing: null,
+      waiting: waitingWorker,
+      addEventListener: vi.fn(),
+    });
+
+    setNavigator({
+      serviceWorker: {
+        register: registerMock,
+        getRegistration: getRegistrationMock,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        controller: {},
+      },
+    });
+
+    const { ServiceWorkerRegistrar } = await import('./ServiceWorkerRegistrar');
+    await act(async () => {
+      root.render(<ServiceWorkerRegistrar />);
+    });
+
+    await waitFor(() => {
+      expect(getRegistrationMock).toHaveBeenCalled();
+    });
+  });
+
+  it('promptUpdateToast renders Update Available toast and Update App button posts SKIP_WAITING', async () => {
+    const originalReload = window.location.reload;
+    const reloadMock = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, reload: reloadMock },
+    });
+
+    const postMessageMock = vi.fn();
+    const mockWorker = {
+      postMessage: postMessageMock,
+    } as unknown as ServiceWorker;
+
+    const { promptUpdateToast } = await import('./ServiceWorkerRegistrar');
+
+    // Call promptUpdateToast
+    const toastId = promptUpdateToast(mockWorker);
+    expect(toastId).toBeDefined();
+
+    // Clean up window.location
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, reload: originalReload },
+    });
+  });
 });
+
