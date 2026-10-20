@@ -25,7 +25,7 @@ import {
   BASE_FEE,
   xdr,
 } from '@stellar/stellar-sdk';
-import { getRpcUrl, getNetworkPassphrase, getFeeMultiplier } from './env';
+import { getRpcUrl, getNetworkPassphrase, getFeeMultiplier, getHorizonUrl } from './env';
 import {
   withIdempotency,
   normalizeError,
@@ -630,5 +630,83 @@ export async function checkRecipientExists(
     const message = err instanceof Error ? err.message : String(err);
     if (/not found|404/i.test(message)) return false;
     throw err;
+  }
+}
+
+/** Minimum native XLM (in stroops) an account must hold to be considered funded. */
+export const BASE_RESERVE_STROOPS = 10_000_000n; // 1 XLM
+
+export interface RecipientBalanceResult {
+  exists: boolean;
+  /** Native XLM balance in stroops. `0n` when the account does not exist. */
+  nativeBalance: bigint;
+  /** True when the account exists and holds at least the base reserve. */
+  funded: boolean;
+}
+
+/**
+ * Check whether a Stellar account exists and holds enough native XLM
+ * to cover the base reserve (#777).
+ *
+ * Queries Horizon `accounts/{address}` for the native balance.
+ * Recipients with unfunded accounts cannot hold trustlines or interact
+ * with stream contracts until they establish native reserves.
+ */
+export async function checkRecipientBalance(
+  address: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<RecipientBalanceResult> {
+  const timeoutMs = options?.timeoutMs ?? 10_000;
+
+  if (options?.signal?.aborted) throw new OperationAbortedError();
+
+  const horizonUrl = getHorizonUrl();
+  if (!horizonUrl) {
+    // No Horizon URL configured — fall back to existence-only check.
+    const exists = await checkRecipientExists(address, options);
+    return {
+      exists,
+      nativeBalance: exists ? BASE_RESERVE_STROOPS : 0n,
+      funded: exists,
+    };
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  options?.signal?.addEventListener('abort', onAbort);
+
+  try {
+    const res = await fetch(
+      `${horizonUrl.replace(/\/$/, '')}/accounts/${address}`,
+      { signal: controller.signal },
+    );
+    if (res.status === 404) {
+      return { exists: false, nativeBalance: 0n, funded: false };
+    }
+    if (!res.ok) throw new Error(`Horizon returned ${res.status}`);
+    const body = (await res.json()) as {
+      balances?: Array<{ asset_type: string; balance: string }>;
+    };
+    const native = body.balances?.find((b) => b.asset_type === 'native');
+    const nativeBalance = native
+      ? BigInt(Math.round(parseFloat(native.balance) * 1e7))
+      : 0n;
+    return {
+      exists: true,
+      nativeBalance,
+      funded: nativeBalance >= BASE_RESERVE_STROOPS,
+    };
+  } catch (err: unknown) {
+    if (err instanceof OperationAbortedError) throw err;
+    if (options?.signal?.aborted || controller.signal.aborted) throw new OperationAbortedError();
+    const message = err instanceof Error ? err.message : String(err);
+    if (/not found|404/i.test(message)) {
+      return { exists: false, nativeBalance: 0n, funded: false };
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+    options?.signal?.removeEventListener('abort', onAbort);
   }
 }

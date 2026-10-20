@@ -92,9 +92,9 @@ reading before adding a new mutation, since they determine how concurrent calls 
 | Page | Composes |
 |------|----------|
 | `/streams` | `StreamCard` (one per stream, sender + recipient tabs) |
-| `/stream/[id]` | `StreamTimeline` (progress viz) + `StreamActions` (role-gated buttons) + `WithdrawButton` + `RateTicker` |
+| `/stream/[id]` | `StreamTimeline` (progress viz) + `StreamFlowPipe` (animated flow) + `StreamActions` (role-gated buttons) + `WithdrawButton` + `RateTicker` |
 | `/dashboard` | `StreamCard` + aggregate totals computed inline from all fetched streams |
-| `/create` | Form built directly with `react-hook-form` + `zod`; no separate form component |
+| `/create` | Form built directly with `react-hook-form` + `zod`; includes template presets, cliff-date validation, and recipient balance check |
 | every page | `Navbar` (via root layout) → `ConnectButton` → `useWallet()` |
 
 `StreamActions` gates which buttons render by role (`isSender`/`isRecipient`) and by status

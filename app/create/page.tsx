@@ -9,7 +9,7 @@ import { useWallet }        from '@/contexts/WalletContext';
 import { createStream, isMock } from '@/lib/factory';
 import { TOKENS_TESTNET, tokenLogoUrl } from '@/lib/tokens';
 import { CopyHashButton }   from '@/components/ui/CopyHashButton';
-import { checkRecipientExists } from '@/lib/soroban';
+import { checkRecipientBalance, checkRecipientExists } from '@/lib/soroban';
 import { refreshStreamData } from '@/lib/queryClient';
 import { getFactoryContractId } from '@/lib/env';
 import { getTokenAllowanceGateway } from '@/lib/token-allowance-gateway';
@@ -29,6 +29,7 @@ const schema = z.object({
   // 25920000 instead of 2592000) had no client-side guard before signing.
   // 10 years mirrors DripGovernor's own default max_duration_seconds cap.
   durationSeconds: z.coerce.number().min(3600, 'Minimum 1 hour').max(315_360_000, 'Maximum 10 years'),
+  cliffDate:       z.string().optional(),
   clawback:        z.boolean(),
 });
 
@@ -70,6 +71,34 @@ function zodResolver<T extends ZodType>(schema: T) {
 
 type FormValues = z.infer<typeof schema>;
 
+/**
+ * Stream template presets (#775) — standard industry vesting / payment
+ * schedules that auto-fill duration, deposit, and cliff fields.
+ */
+const STREAM_TEMPLATES = [
+  {
+    id: 'weekly-payroll',
+    label: 'Weekly Payroll',
+    durationSeconds: 604_800,        // 7 days
+    depositAmount: '700',
+    cliffDays: 0,
+  },
+  {
+    id: 'monthly-retainer',
+    label: 'Monthly Retainer',
+    durationSeconds: 2_592_000,      // 30 days
+    depositAmount: '3000',
+    cliffDays: 0,
+  },
+  {
+    id: 'four-year-grant',
+    label: '4-Year Grant',
+    durationSeconds: 126_144_000,    // 4 years
+    depositAmount: '48000',
+    cliffDays: 365,                  // 1-year cliff
+  },
+] as const;
+
 export default function CreatePage() {
   const router = useRouter();
   const { publicKey, signTx, connected } = useWallet();
@@ -88,8 +117,10 @@ export default function CreatePage() {
   // the Zod length/format guard (i.e. it's a plausible 56-char G… key).
   // Debounced to avoid hammering the RPC on every keystroke.
   const [recipientStatus, setRecipientStatus] = useState<
-    'idle' | 'checking' | 'valid' | 'not-found' | 'error'
+    'idle' | 'checking' | 'valid' | 'not-found' | 'unfunded' | 'error'
   >('idle');
+  // Native balance of the recipient in stroops (0n when unknown / unfunded).
+  const [recipientBalance, setRecipientBalance] = useState<bigint>(0n);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // #309 — request-sequence guard so a stale in-flight checkRecipientExists()
   // call can't overwrite recipientStatus after a newer one has already
@@ -97,7 +128,7 @@ export default function CreatePage() {
   // isCurrent() pattern.
   const recipientSeqRef = useRef(0);
 
-  const { register, handleSubmit, watch, formState: { errors } } = useForm<FormValues>({
+  const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: { token: 'XLM', clawback: false, durationSeconds: 2592000 },
   });
@@ -144,9 +175,18 @@ export default function CreatePage() {
 
       try {
         // Add a 10-second timeout to prevent an infinite loading state (#123)
-        const exists = await checkRecipientExists(recipient, { timeoutMs: 10_000 });
+        const result = await checkRecipientBalance(recipient, { timeoutMs: 10_000 });
         if (!isCurrent()) return;
-        setRecipientStatus(exists ? 'valid' : 'not-found');
+        if (!result.exists) {
+          setRecipientStatus('not-found');
+          setRecipientBalance(0n);
+        } else if (!result.funded) {
+          setRecipientStatus('unfunded');
+          setRecipientBalance(result.nativeBalance);
+        } else {
+          setRecipientStatus('valid');
+          setRecipientBalance(result.nativeBalance);
+        }
       } catch (err) {
         // Network / RPC error — don't block the user, but surface a warning.
         if (!isCurrent()) return;
@@ -189,6 +229,40 @@ export default function CreatePage() {
   const rateWouldBeZero = deposit && duration
     ? wouldRateTruncateToZero(deposit, tokenDecimals, duration)
     : false;
+
+  // ── Cliff date validation (#776) ─────────────────────────────────────────
+  // The cliff must fall strictly before the computed end date
+  // (startTime + durationSeconds). startTime is "now + 60s" at submit time,
+  // so we validate against the same formula used in onSubmit.
+  const cliffDateValue = watch('cliffDate');
+  const cliffError = (() => {
+    if (!cliffDateValue) return null;
+    const cliffMs = new Date(cliffDateValue).getTime();
+    if (Number.isNaN(cliffMs)) return 'Enter a valid cliff date.';
+    const startSec = Math.floor(Date.now() / 1000) + 60;
+    const endSec = startSec + (Number(duration) || 0);
+    const cliffSec = Math.floor(cliffMs / 1000);
+    if (cliffSec >= endSec) {
+      return 'Cliff date must be strictly before the stream end date.';
+    }
+    if (cliffSec < startSec) {
+      return 'Cliff date must be after the stream start.';
+    }
+    return null;
+  })();
+  const cliffInvalid = cliffError !== null;
+
+  // ── Template presets (#775) ──────────────────────────────────────────────
+  const applyTemplate = (template: (typeof STREAM_TEMPLATES)[number]) => {
+    setValue('durationSeconds', template.durationSeconds);
+    setValue('depositAmount', template.depositAmount);
+    if (template.cliffDays > 0) {
+      const cliff = new Date(Date.now() + template.cliffDays * 86_400_000);
+      setValue('cliffDate', cliff.toISOString().slice(0, 16));
+    } else {
+      setValue('cliffDate', '');
+    }
+  };
 
   async function onSubmit(data: FormValues) {
     if (!publicKey) {
@@ -328,6 +402,26 @@ export default function CreatePage() {
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
 
+        {/* Stream template presets (#775) */}
+        <div>
+          <p className="text-xs font-semibold mb-2 dark:text-white">Quick templates</p>
+          <div className="flex flex-wrap gap-2">
+            {STREAM_TEMPLATES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => applyTemplate(t)}
+                className="px-3 py-1.5 text-xs rounded-full border border-gray-200 dark:border-gray-700 hover:border-black dark:hover:border-white hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 dark:text-gray-500 mt-1.5">
+            Applies a standard vesting schedule — adjusts duration, deposit, and cliff.
+          </p>
+        </div>
+
         {/* Recipient */}
         <div>
           <label className="block text-xs font-semibold mb-1 dark:text-white">Recipient address</label>
@@ -350,10 +444,17 @@ export default function CreatePage() {
               Account not found on-chain — the recipient must be funded before receiving a stream.
             </p>
           )}
+          {!errors.recipient && recipientStatus === 'unfunded' && (
+            <p className="text-xs text-amber-600 mt-1" role="alert">
+              <span aria-hidden="true">⚠ </span>
+              Account exists but has no native XLM reserve. The recipient must hold at least 1 XLM to receive streams.
+            </p>
+          )}
           {!errors.recipient && recipientStatus === 'valid' && (
             <p className="text-xs text-gray-500 mt-1" role="status">
               <span aria-hidden="true">✓ </span>
-              Account verified on-chain.
+              Account verified on-chain
+              {recipientBalance > 0n && ` — ${Number(recipientBalance) / 1e7} XLM`}.
             </p>
           )}
           {!errors.recipient && recipientStatus === 'error' && (
@@ -415,6 +516,26 @@ export default function CreatePage() {
           )}
         </div>
 
+        {/* Cliff date (#776) */}
+        <div>
+          <label className="block text-xs font-semibold mb-1 dark:text-white">
+            Cliff date <span className="text-gray-400 dark:text-gray-500 font-normal">(optional)</span>
+          </label>
+          <input
+            {...register('cliffDate')}
+            type="datetime-local"
+            className="input"
+          />
+          {cliffError && (
+            <p className="text-xs text-red-600 mt-1" role="alert">{cliffError}</p>
+          )}
+          {!cliffError && cliffDateValue && (
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+              No tokens release before this date.
+            </p>
+          )}
+        </div>
+
         {/* Rate preview */}
         {deposit && duration && (
           <div className={`card bg-gray-50 dark:bg-gray-800 border-gray-100 dark:border-gray-700 flex items-start gap-2 ${styles.flexRowStart}`}>
@@ -464,7 +585,14 @@ export default function CreatePage() {
         {/* Submit */}
         <button
           type="submit"
-          disabled={pending || !connected || rateWouldBeZero || recipientStatus === 'not-found'}
+          disabled={
+            pending ||
+            !connected ||
+            rateWouldBeZero ||
+            cliffInvalid ||
+            recipientStatus === 'not-found' ||
+            recipientStatus === 'unfunded'
+          }
           className="btn-primary w-full"
         >
           {pending

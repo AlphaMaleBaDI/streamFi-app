@@ -10,6 +10,7 @@ import { Card }            from '@/components/ui/Card';
 import { RateTicker }      from '@/components/stream/RateTicker';
 import { StreamTimeline }  from '@/components/stream/StreamTimeline';
 import { StreamFlowChart } from '@/components/stream/StreamFlowChart';
+import { StreamFlowPipe }  from '@/components/stream/StreamFlowPipe';
 import { StreamActions }   from '@/components/stream/StreamActions';
 import { useWallet }       from '@/contexts/WalletContext';
 import { getStreamAddress, getStreamInfo, getWithdrawable } from '@/lib/stream';
@@ -196,6 +197,23 @@ export default function StreamPage() {
           pausedAt={info.pausedAt}
           cancelled={info.cancelled}
           tokenSymbol={tokenSymbol}
+        />
+      </div>
+
+      {/* Live animated flow pipe (#778) */}
+      <div className="mb-6">
+        <StreamFlowPipe
+          active={status === 'active'}
+          progress={
+            info.endTime > 0
+              ? Math.min(
+                  1,
+                  Math.max(0, (Math.floor(Date.now() / 1000) - info.startTime) / (info.endTime - info.startTime)),
+                )
+              : 0.5
+          }
+          senderLabel={truncateAddress(info.sender)}
+          recipientLabel={truncateAddress(info.recipient)}
         />
       </div>
 
