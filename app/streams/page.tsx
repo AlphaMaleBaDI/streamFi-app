@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Plus, AlertCircle, Columns, Pause, Wallet, X } from "lucide-react";
+import { Plus, AlertCircle, Columns, Pause, Wallet, X, Download } from "lucide-react";
 import { useWallet } from "@/contexts/WalletContext";
 import { StreamCard } from "@/components/stream/StreamCard";
 import { StreamCardSkeleton } from "@/components/stream/StreamCardSkeleton";
@@ -14,7 +14,8 @@ import { useNetworkStatus } from "@/hooks/useNetworkStatus";
 import { deriveStatus, MAX_COMPARE, MIN_COMPARE, type StreamStatus } from "@/lib/stream-compare";
 import { sortStreams, isSortKey, SORT_OPTIONS, type SortKey } from "@/lib/stream-sort";
 import { tokenByAddress } from "@/lib/tokens";
-import { truncateAddress } from "@/lib/format";
+import { truncateAddress, fromStroops } from "@/lib/format";
+import { streamsToCsv, downloadCsv } from "@/lib/csv";
 
 type Tab = "receiving" | "sending";
 
@@ -211,6 +212,46 @@ function StreamsView() {
   );
 
   const selectedRows = displayed.filter(row => selected.includes(row.id));
+
+  // #726 — export selected (or all displayed) streams to CSV for bookkeeping.
+  function exportCsv() {
+    const rows = selected.length > 0 ? selectedRows : displayed;
+    if (rows.length === 0) return;
+    const csv = streamsToCsv(
+      rows.map((row) => ({
+        id: row.id,
+        sender: row.info.sender,
+        recipient: row.info.recipient,
+        token: tokenByAddress(row.info.token, "testnet")?.symbol ?? row.info.token,
+        ratePerSecond: fromStroops(row.info.ratePerSecond),
+        totalDeposited: fromStroops(
+          row.info.endTime > 0
+            ? row.info.ratePerSecond * BigInt(row.info.endTime - row.info.startTime)
+            : row.info.withdrawn + 0n,
+        ),
+        withdrawn: fromStroops(row.info.withdrawn),
+        status: row.status,
+        startTime: row.info.startTime,
+        endTime: row.info.endTime,
+      })),
+      {
+        columnMappings: [
+          { key: "id", header: "Stream ID" },
+          { key: "sender", header: "Sender" },
+          { key: "recipient", header: "Recipient" },
+          { key: "token", header: "Token" },
+          { key: "ratePerSecond", header: "Rate/sec" },
+          { key: "totalDeposited", header: "Total Deposited" },
+          { key: "withdrawn", header: "Withdrawn" },
+          { key: "status", header: "Status" },
+          { key: "startTime", header: "Start Time", dateFormat: "iso" },
+          { key: "endTime", header: "End Time", dateFormat: "iso" },
+        ],
+      },
+    );
+    downloadCsv(`streams-${tab}-${new Date().toISOString().slice(0, 10)}.csv`, csv);
+    setBatchMessage(`Exported ${rows.length} stream${rows.length === 1 ? "" : "s"} to CSV.`);
+  }
   async function runBatch(action: 'pause' | 'withdraw' | 'cancel') {
     if (!publicKey || !signTx || selectedRows.length === 0) return;
     setBatchPending(true); setBatchMessage(null);
@@ -323,6 +364,7 @@ function StreamsView() {
             {tab === 'sending' && <button disabled={batchPending} onClick={() => void runBatch('pause')} className="btn-secondary text-xs"><Pause className="w-3 h-3" /> Bulk Pause</button>}
             {tab === 'receiving' && <button disabled={batchPending} onClick={() => void runBatch('withdraw')} className="btn-secondary text-xs"><Wallet className="w-3 h-3" /> Bulk Withdraw</button>}
             {tab === 'sending' && <button disabled={batchPending} onClick={() => void runBatch('cancel')} className="btn-secondary text-xs"><X className="w-3 h-3" /> Bulk Cancel</button>}
+            <button onClick={exportCsv} className="btn-secondary text-xs"><Download className="w-3 h-3" /> Export CSV</button>
             <button
               onClick={() => setSelected([])}
               className="text-xs underline text-gray-400 hover:text-black dark:hover:text-white"
