@@ -5,6 +5,28 @@ import * as soroban from '@/lib/soroban';
 import { type CircuitBreakerState } from '@/lib/soroban';
 
 /**
+ * Default protocol maintenance recovery window in milliseconds (#817).
+ */
+export const PROTOCOL_MAINTENANCE_WINDOW_MS = Number(
+  process.env.NEXT_PUBLIC_MAINTENANCE_WINDOW_MS || 30_000,
+);
+
+/**
+ * Format a remaining millisecond duration as MM:SS for the maintenance recovery countdown (#817).
+ */
+export function formatMaintenanceCountdown(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+export interface CircuitBreakerOverlayProps {
+  /** Optional override for protocol maintenance window duration in ms (#817). */
+  maintenanceWindowMs?: number;
+}
+
+/**
  * Dev-only overlay that surfaces per-endpoint circuit-breaker state.
  *
  * Helps debug RPC flakiness by showing which scopes have tripped the breaker
@@ -12,7 +34,9 @@ import { type CircuitBreakerState } from '@/lib/soroban';
  * next automatic retry attempt and automatically tests the circuit upon expiry.
  * Only renders in development builds.
  */
-export function CircuitBreakerOverlay() {
+export function CircuitBreakerOverlay({
+  maintenanceWindowMs = PROTOCOL_MAINTENANCE_WINDOW_MS,
+}: CircuitBreakerOverlayProps = {}) {
   const [states, setStates] = useState<CircuitBreakerState[]>([]);
   const [mounted, setMounted] = useState(false);
   const testedScopesRef = useRef<Set<string>>(new Set());
@@ -46,12 +70,28 @@ export function CircuitBreakerOverlay() {
 
   if (!mounted || states.length === 0) return null;
 
+  const openStates = states.filter((s) => s.isOpen);
+  const estimatedRemainingMs =
+    openStates.length > 0
+      ? Math.max(...openStates.map((s) => s.remainingMs || maintenanceWindowMs))
+      : 0;
+  const estimatedRecoverySeconds = Math.ceil(estimatedRemainingMs / 1000);
+
   return (
     <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-yellow-400/50 bg-yellow-50 p-3 text-xs shadow-lg dark:border-yellow-600/50 dark:bg-yellow-950/90 dark:text-yellow-100">
       <div className="mb-2 font-semibold">Circuit Breaker Monitor</div>
       <p className="mb-2 text-[11px] opacity-80">
         Some actions are paused while the network recovers. They resume automatically.
       </p>
+      {estimatedRecoverySeconds > 0 && (
+        <div
+          data-testid="maintenance-countdown"
+          aria-live="polite"
+          className="mb-2 rounded bg-yellow-100/80 px-2 py-1 font-mono text-[11px] font-medium text-yellow-900 dark:bg-yellow-900/50 dark:text-yellow-200"
+        >
+          Estimated maintenance recovery: {formatMaintenanceCountdown(estimatedRemainingMs)} ({estimatedRecoverySeconds}s)
+        </div>
+      )}
       <ul className="space-y-1.5">
         {states.map((s) => {
           const seconds = Math.ceil(s.remainingMs / 1000);
@@ -104,7 +144,8 @@ export function CircuitBreakerOverlay() {
                       fill="none"
                       strokeDasharray={56.5}
                       strokeDashoffset={
-                        56.5 * (1 - Math.max(0, Math.min(1, s.remainingMs / 30000)))
+                        56.5 *
+                        (1 - Math.max(0, Math.min(1, s.remainingMs / maintenanceWindowMs)))
                       }
                       className="transition-all duration-1000"
                     />
