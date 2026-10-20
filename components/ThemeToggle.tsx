@@ -14,6 +14,21 @@ export function getNextTheme(theme?: string): ThemeChoice {
 
 export const THEME_STORAGE_KEY = 'streamfi-theme';
 
+/**
+ * Smooth CSS color transition applied to the global root container when switching themes (#818).
+ */
+export const THEME_TRANSITION_STYLE = 'background-color 0.3s ease, color 0.3s ease';
+
+export function applyThemeTransition(root?: HTMLElement | null): void {
+  const target =
+    root ?? (typeof document !== 'undefined' ? document.documentElement : null);
+  if (!target) return;
+  target.style.transition = THEME_TRANSITION_STYLE;
+  if (typeof document !== 'undefined' && document.body) {
+    document.body.style.transition = THEME_TRANSITION_STYLE;
+  }
+}
+
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
@@ -24,6 +39,7 @@ export function ThemeToggle() {
 
   useEffect(() => {
     setMounted(true);
+    applyThemeTransition();
     try {
       const stored =
         localStorage.getItem(THEME_STORAGE_KEY) ||
@@ -60,6 +76,7 @@ export function ThemeToggle() {
         : 'Switch to light mode';
 
   const handleToggle = () => {
+    applyThemeTransition();
     setTheme(nextTheme);
     try {
       localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
@@ -72,16 +89,16 @@ export function ThemeToggle() {
   return (
     <button
       onClick={handleToggle}
-      className="inline-flex items-center justify-center w-9 h-9 rounded text-gray-500 hover:text-black hover:bg-gray-100 dark:text-gray-400 dark:hover:text-white dark:hover:bg-gray-800 transition-colors"
+      className="inline-flex items-center justify-center w-9 h-9 rounded text-gray-500 hover:text-black hover:bg-gray-100 dark:text-gray-400 dark:hover:text-white dark:hover:bg-gray-800 transition-colors duration-300 ease-in-out"
       aria-label={label}
       title={label}
     >
       {theme === 'system' ? (
-        <Monitor className="w-4 h-4" />
+        <Monitor className="w-4 h-4 transition-opacity duration-300 ease-in-out" />
       ) : isDark ? (
-        <Sun className="w-4 h-4" />
+        <Sun className="w-4 h-4 transition-opacity duration-300 ease-in-out" />
       ) : (
-        <Moon className="w-4 h-4" />
+        <Moon className="w-4 h-4 transition-opacity duration-300 ease-in-out" />
       )}
     </button>
   );

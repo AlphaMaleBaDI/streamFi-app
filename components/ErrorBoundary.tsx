@@ -1,12 +1,54 @@
 'use client';
-import { captureError } from "@/lib/error-tracking";
+import { captureError, scrubSensitiveData } from "@/lib/error-tracking";
 
 import React, { Component, ErrorInfo, ReactNode } from 'react';
+
+export const CRASH_TELEMETRY_ENDPOINT = '/api/telemetry/crash';
+
+/**
+ * Forward caught React render errors to the decentralized crash reporter / telemetry endpoint (#816).
+ */
+export function reportCrashToTelemetry(
+  error: Error,
+  errorInfo: ErrorInfo,
+  endpoint: string = process.env.NEXT_PUBLIC_CRASH_TELEMETRY_ENDPOINT || CRASH_TELEMETRY_ENDPOINT,
+): void {
+  const payload = JSON.stringify({
+    name: error.name || 'Error',
+    message: scrubSensitiveData(error.message || ''),
+    stack: error.stack ? scrubSensitiveData(error.stack) : undefined,
+    componentStack: errorInfo.componentStack ? scrubSensitiveData(errorInfo.componentStack) : null,
+    timestamp: new Date().toISOString(),
+    source: 'ErrorBoundary',
+  });
+
+  try {
+    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+      navigator.sendBeacon(endpoint, payload);
+      return;
+    }
+    if (typeof fetch === 'function') {
+      Promise.resolve(
+        fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+          keepalive: true,
+        }),
+      ).catch(() => {
+        // Ignore transport errors so telemetry reporting never breaks error recovery
+      });
+    }
+  } catch {
+    // Ignore synchronous telemetry dispatch errors
+  }
+}
 
 interface Props {
   children?: ReactNode;
   fallback?: (error: Error, retry: () => void, reset: () => void) => ReactNode;
   onError?: (error: Error, errorInfo: ErrorInfo) => void;
+  telemetryEndpoint?: string;
 }
 
 interface State {
@@ -52,6 +94,7 @@ export class ErrorBoundary extends Component<Props, State> {
     });
 
     captureError(error, { tags: { source: 'ErrorBoundary' }, extra: { componentStack: errorInfo.componentStack } });
+    reportCrashToTelemetry(error, errorInfo, this.props.telemetryEndpoint);
     this.props.onError?.(error, errorInfo);
   }
 

@@ -90,3 +90,61 @@ export function computeCashflow(
 
   return { totalIncoming, totalOutgoing, net: totalIncoming - totalOutgoing, daily };
 }
+
+/** Default average transaction fee on Stellar / Soroban in stroops (0.001 XLM = 10,000 stroops). */
+export const DEFAULT_AVG_TX_FEE_STROOPS = 10_000n;
+
+export interface GasEfficiencySummary {
+  /** Total number of discrete withdrawal / payout transactions avoided across all streams. */
+  totalWithdrawalsAvoided: number;
+  /** Estimated average transaction fee in stroops. */
+  avgTxFeeStroops: bigint;
+  /** Total lifetime gas fees saved in stroops = total_withdrawals_avoided * avg_tx_fee. */
+  totalGasSavedStroops: bigint;
+  /** Number of streams evaluated. */
+  totalStreams: number;
+}
+
+/**
+ * Calculate total lifetime gas fees saved through streaming payments (#785).
+ *
+ * For each stream, calculates the number of discrete payouts avoided over the stream's
+ * active duration (at least 1 payout avoided, plus 1 per daily payout period), multiplied
+ * by the average transaction fee.
+ */
+export function computeGasEfficiency(
+  streams: CashflowStream[],
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+  options?: {
+    avgTxFeeStroops?: bigint;
+    payoutIntervalSeconds?: number;
+  },
+): GasEfficiencySummary {
+  const avgTxFee = options?.avgTxFeeStroops ?? DEFAULT_AVG_TX_FEE_STROOPS;
+  const interval = options?.payoutIntervalSeconds ?? 86_400; // 1 day
+
+  let totalWithdrawalsAvoided = 0;
+
+  for (const { info } of streams) {
+    if (info.ratePerSecond <= 0n) continue;
+    const streamStart = info.startTime;
+    const streamEnd = info.endTime > 0 ? Math.min(info.endTime, nowSeconds) : nowSeconds;
+    if (streamEnd <= streamStart) continue;
+
+    const duration = streamEnd - streamStart;
+    // Without streaming, payouts would occur every interval (e.g. daily).
+    // Avoided transactions = duration / interval (minimum 1 payout avoided).
+    const avoided = Math.max(1, Math.floor(duration / interval));
+    totalWithdrawalsAvoided += avoided;
+  }
+
+  const totalGasSavedStroops = BigInt(totalWithdrawalsAvoided) * avgTxFee;
+
+  return {
+    totalWithdrawalsAvoided,
+    avgTxFeeStroops: avgTxFee,
+    totalGasSavedStroops,
+    totalStreams: streams.length,
+  };
+}
+

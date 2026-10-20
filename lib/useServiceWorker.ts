@@ -73,13 +73,9 @@ export function useServiceWorker() {
     const promoteWhenReady = (worker: ServiceWorker | null) => {
       if (!worker) return;
       worker.addEventListener('statechange', () => {
-        // A new worker finished installing while another controls the page →
-        // there's an update waiting. Tell it to skip `waiting`; `sw.js` should
-        // handle a `SKIP_WAITING` message (a no-op if it doesn't, in which
-        // case the update lands on the next full close).
-        if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-          worker.postMessage({ type: 'SKIP_WAITING' });
-        }
+        // When a new worker finishes installing while another controls the page,
+        // it enters the 'waiting' state. Users are notified to click 'Update App'
+        // before SKIP_WAITING is sent (#822).
       });
     };
 
@@ -90,9 +86,6 @@ export function useServiceWorker() {
           periodicSync?: { register: (tag: string, options: { minInterval: number }) => Promise<void> };
         }).periodicSync;
         void periodicSync?.register('conduit-cache-update', { minInterval: 24 * 60 * 60 * 1000 });
-        if (registration.waiting && navigator.serviceWorker.controller) {
-          registration.waiting.postMessage({ type: 'SKIP_WAITING' });
-        }
         promoteWhenReady(registration.installing);
         registration.addEventListener('updatefound', () => {
           promoteWhenReady(registration.installing);

@@ -21,6 +21,12 @@ const MAX_BREADCRUMBS = 20
 
 const SENTRY_DSN = process.env.NEXT_PUBLIC_SENTRY_DSN
 
+/** Wallet cancellations are expected user flow, not actionable failures. */
+export function isUserRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return /user\s*(rejected|denied|declined)|transaction\s*(cancelled|canceled)|request\s*rejected|denied by user/i.test(message)
+}
+
 /**
  * Whether error tracking is enabled (Sentry DSN is configured).
  */
@@ -107,6 +113,7 @@ export function captureError(
     extra?: Record<string, unknown>
   },
 ): void {
+  if (isUserRejection(error)) return
   const rawErr = error instanceof Error ? error : new Error(String(error))
   const cleanMessage = scrubSensitiveData(rawErr.message)
   const err = rawErr.message === cleanMessage ? rawErr : new Error(cleanMessage)

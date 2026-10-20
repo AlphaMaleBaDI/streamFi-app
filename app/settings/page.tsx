@@ -20,13 +20,27 @@ import {
   REFRESH_INTERVAL_OPTIONS,
   notifySettingsUpdated,
 } from "@/hooks/useSettings";
-
-
+import { DeveloperPayloadInspector } from "@/components/DeveloperPayloadInspector";
+import {
+  type NotificationChannelConfig,
+  type NotificationMatrix,
+  type NotificationChannel,
+  type NotificationEventKey,
+  DEFAULT_NOTIFICATION_CHANNELS,
+  DEFAULT_NOTIFICATION_MATRIX,
+  NOTIFICATION_EVENT_LABELS,
+  isNotificationSupported,
+  requestNotificationPermission,
+} from "@/lib/notifications";
 
 interface SettingsState {
   network: NetworkName;
 
   notificationsEnabled: boolean;
+  notificationChannels: NotificationChannelConfig;
+  notificationMatrix: NotificationMatrix;
+  /** Developer mode reveals raw contract storage keys and XDR payloads in confirmation dialogs (#787). */
+  developerMode: boolean;
   /** Display timestamps as relative ("2h ago") or absolute date-time. Added #556. */
   timeFormat: TimeFormat;
   /**
@@ -34,6 +48,8 @@ interface SettingsState {
    * Minimum enforced value is 10 s to avoid hammering the RPC endpoint. Added #572.
    */
   autoRefreshInterval: RefreshIntervalSeconds;
+  /** Local currency for fiat display. Added #731. */
+  currency: 'USD' | 'EUR' | 'GBP';
 }
 
 const STORAGE_KEY = "conduit:settings";
@@ -44,6 +60,9 @@ function loadSettings(): SettingsState {
       network: "testnet" as NetworkName,
 
       notificationsEnabled: true,
+      notificationChannels: DEFAULT_NOTIFICATION_CHANNELS,
+      notificationMatrix: DEFAULT_NOTIFICATION_MATRIX,
+      developerMode: false,
       timeFormat: "absolute",
       autoRefreshInterval: 0,
     };
@@ -56,12 +75,16 @@ function loadSettings(): SettingsState {
         network: parsed.network ?? ("testnet" as NetworkName),
 
         notificationsEnabled: parsed.notificationsEnabled ?? true,
+        notificationChannels: parsed.notificationChannels ?? DEFAULT_NOTIFICATION_CHANNELS,
+        notificationMatrix: parsed.notificationMatrix ?? DEFAULT_NOTIFICATION_MATRIX,
+        developerMode: parsed.developerMode === true,
         timeFormat: parsed.timeFormat === "relative" ? "relative" : "absolute",
         autoRefreshInterval: REFRESH_INTERVAL_OPTIONS.some(
           (o) => o.value === parsed.autoRefreshInterval,
         )
           ? (parsed.autoRefreshInterval as RefreshIntervalSeconds)
           : 0,
+        currency: parsed.currency === "EUR" ? "EUR" : parsed.currency === "GBP" ? "GBP" : "USD",
       };
     }
   } catch {
@@ -71,8 +94,12 @@ function loadSettings(): SettingsState {
     network: "testnet" as NetworkName,
 
     notificationsEnabled: true,
+    notificationChannels: DEFAULT_NOTIFICATION_CHANNELS,
+    notificationMatrix: DEFAULT_NOTIFICATION_MATRIX,
+    developerMode: false,
     timeFormat: "absolute",
     autoRefreshInterval: 0,
+    currency: "USD",
   };
 }
 
@@ -124,11 +151,42 @@ export default function SettingsPage() {
     [],
   );
 
+  const updateChannelConfig = useCallback(
+    <K extends keyof NotificationChannelConfig>(key: K, value: NotificationChannelConfig[K]) => {
+      setSettings((prev) => ({
+        ...prev,
+        notificationChannels: { ...prev.notificationChannels, [key]: value },
+      }));
+      setSaved(false);
+    },
+    [],
+  );
+
+  const updateMatrixCell = useCallback(
+    (eventKey: NotificationEventKey, channel: NotificationChannel, value: boolean) => {
+      setSettings((prev) => ({
+        ...prev,
+        notificationMatrix: {
+          ...prev.notificationMatrix,
+          [eventKey]: {
+            ...prev.notificationMatrix[eventKey],
+            [channel]: value,
+          },
+        },
+      }));
+      setSaved(false);
+    },
+    [],
+  );
+
   const handleReset = useCallback(() => {
     const defaults: SettingsState = {
       network: "testnet" as NetworkName,
 
       notificationsEnabled: true,
+      notificationChannels: DEFAULT_NOTIFICATION_CHANNELS,
+      notificationMatrix: DEFAULT_NOTIFICATION_MATRIX,
+      developerMode: false,
       timeFormat: "absolute",
       autoRefreshInterval: 0,
     };
@@ -330,6 +388,23 @@ export default function SettingsPage() {
         <h2 className="text-sm font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-4">
           Preferences
         </h2>
+        <div className="flex flex-col space-y-4">
+          {/* Slippage Tolerance */}
+          <div className="flex flex-row items-center justify-between">
+            <span className="text-sm">Slippage Tolerance</span>
+            <div className="flex gap-2">
+              {["0.5%", "1%", "2%", "5%"].map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className="px-3 py-1 rounded text-sm font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Timestamp Format — issue #556 */}
           <div className="flex flex-row items-center justify-between">
             <div>
@@ -383,26 +458,263 @@ export default function SettingsPage() {
               ))}
             </select>
           </div>
+
+          {/* Currency Display — issue #731 */}
+          <div className="flex flex-row items-center justify-between">
+            <div>
+              <span className="text-sm">Display Currency</span>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                Show fiat estimates alongside token amounts.
+              </p>
+            </div>
+            <select
+              value={settings.currency}
+              onChange={(e) =>
+                updateSetting("currency", e.target.value as "USD" | "EUR" | "GBP")
+              }
+              className="bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded px-3 py-1.5 text-sm"
+            >
+              <option value="USD">USD ($)</option>
+              <option value="EUR">EUR (€)</option>
+              <option value="GBP">GBP (£)</option>
+            </select>
+          </div>
         </div>
       </section>
 
-      {/* Notifications & Advanced */}
+      {/* Notifications & Advanced (#786) */}
       <section className="card">
         <h2 className="text-sm font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-4">
           General
         </h2>
-        <div className="flex flex-col space-y-4">
+        <div className="flex flex-col space-y-6">
           <label className="flex flex-row items-center justify-between cursor-pointer">
-            <span className="text-sm">Enable Notifications</span>
+            <div>
+              <span className="text-sm font-medium">Enable Notifications</span>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                Master switch for protocol alerts and channel delivery.
+              </p>
+            </div>
             <input
               type="checkbox"
               checked={settings.notificationsEnabled}
               onChange={(e) =>
                 updateSetting("notificationsEnabled", e.target.checked)
               }
+              data-testid="notifications-master-toggle"
               className="w-5 h-5 rounded border-gray-300 dark:border-gray-600 text-black dark:text-white focus:ring-black dark:focus:ring-white"
             />
           </label>
+
+          {/* Channel Preferences Matrix (#786) */}
+          <div className="border-t border-gray-100 dark:border-gray-800 pt-4 space-y-4">
+            <div>
+              <span className="text-sm font-medium">Notification Channels</span>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                Configure delivery channels (Browser Push, Email, Telegram) for receiving alerts.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Browser Push */}
+              <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold">Browser Push</span>
+                  <input
+                    type="checkbox"
+                    checked={settings.notificationChannels.browserPush}
+                    onChange={(e) => updateChannelConfig("browserPush", e.target.checked)}
+                    disabled={!settings.notificationsEnabled}
+                    data-testid="channel-toggle-browserPush"
+                    className="w-4 h-4 rounded text-black dark:text-white"
+                  />
+                </div>
+                <p className="text-[11px] text-gray-400 dark:text-gray-500">
+                  Instant local browser alerts on stream progress and milestones.
+                </p>
+                {isNotificationSupported() && (
+                  <button
+                    type="button"
+                    onClick={() => requestNotificationPermission()}
+                    disabled={!settings.notificationsEnabled || !settings.notificationChannels.browserPush}
+                    className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline block pt-1"
+                  >
+                    Request permission
+                  </button>
+                )}
+              </div>
+
+              {/* Email */}
+              <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold">Email</span>
+                  <input
+                    type="checkbox"
+                    checked={settings.notificationChannels.email}
+                    onChange={(e) => updateChannelConfig("email", e.target.checked)}
+                    disabled={!settings.notificationsEnabled}
+                    data-testid="channel-toggle-email"
+                    className="w-4 h-4 rounded text-black dark:text-white"
+                  />
+                </div>
+                <p className="text-[11px] text-gray-400 dark:text-gray-500">
+                  Email notifications for major milestones and stream cancellations.
+                </p>
+                {settings.notificationChannels.email && (
+                  <input
+                    type="email"
+                    value={settings.notificationChannels.emailAddress ?? ""}
+                    onChange={(e) => updateChannelConfig("emailAddress", e.target.value)}
+                    placeholder="name@example.com"
+                    disabled={!settings.notificationsEnabled}
+                    aria-label="Email address for notifications"
+                    className="w-full text-xs px-2 py-1 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded font-mono"
+                  />
+                )}
+              </div>
+
+              {/* Telegram */}
+              <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold">Telegram</span>
+                  <input
+                    type="checkbox"
+                    checked={settings.notificationChannels.telegram}
+                    onChange={(e) => updateChannelConfig("telegram", e.target.checked)}
+                    disabled={!settings.notificationsEnabled}
+                    data-testid="channel-toggle-telegram"
+                    className="w-4 h-4 rounded text-black dark:text-white"
+                  />
+                </div>
+                <p className="text-[11px] text-gray-400 dark:text-gray-500">
+                  Real-time Telegram bot ping on cancellation and cliff reach.
+                </p>
+                {settings.notificationChannels.telegram && (
+                  <input
+                    type="text"
+                    value={settings.notificationChannels.telegramHandle ?? ""}
+                    onChange={(e) => updateChannelConfig("telegramHandle", e.target.value)}
+                    placeholder="@username"
+                    disabled={!settings.notificationsEnabled}
+                    aria-label="Telegram username for notifications"
+                    className="w-full text-xs px-2 py-1 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded font-mono"
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Granular Preferences Matrix */}
+          <div className="border-t border-gray-100 dark:border-gray-800 pt-4 space-y-3">
+            <div>
+              <span className="text-sm font-medium">Notification Preferences Matrix</span>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                Select which channels notify you for specific protocol stream events.
+              </p>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table
+                className="w-full text-left text-xs border border-gray-200 dark:border-gray-700 rounded-lg"
+                data-testid="notification-matrix"
+              >
+                <thead>
+                  <tr className="bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400">
+                    <th className="py-2 px-3 font-semibold">Event</th>
+                    <th className="py-2 px-3 font-semibold text-center">Browser Push</th>
+                    <th className="py-2 px-3 font-semibold text-center">Email</th>
+                    <th className="py-2 px-3 font-semibold text-center">Telegram</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                  {(Object.keys(NOTIFICATION_EVENT_LABELS) as NotificationEventKey[]).map((eventKey) => (
+                    <tr key={eventKey} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/40">
+                      <td className="py-2 px-3">
+                        <span className="font-medium text-black dark:text-white block">
+                          {NOTIFICATION_EVENT_LABELS[eventKey].title}
+                        </span>
+                        <span className="text-[11px] text-gray-400 dark:text-gray-500">
+                          {NOTIFICATION_EVENT_LABELS[eventKey].desc}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 text-center">
+                        <input
+                          type="checkbox"
+                          checked={settings.notificationMatrix[eventKey]?.browserPush ?? false}
+                          onChange={(e) => updateMatrixCell(eventKey, "browserPush", e.target.checked)}
+                          disabled={!settings.notificationsEnabled || !settings.notificationChannels.browserPush}
+                          data-testid={`matrix-${eventKey}-browserPush`}
+                          className="w-4 h-4 rounded text-black dark:text-white"
+                        />
+                      </td>
+                      <td className="py-2 px-3 text-center">
+                        <input
+                          type="checkbox"
+                          checked={settings.notificationMatrix[eventKey]?.email ?? false}
+                          onChange={(e) => updateMatrixCell(eventKey, "email", e.target.checked)}
+                          disabled={!settings.notificationsEnabled || !settings.notificationChannels.email}
+                          data-testid={`matrix-${eventKey}-email`}
+                          className="w-4 h-4 rounded text-black dark:text-white"
+                        />
+                      </td>
+                      <td className="py-2 px-3 text-center">
+                        <input
+                          type="checkbox"
+                          checked={settings.notificationMatrix[eventKey]?.telegram ?? false}
+                          onChange={(e) => updateMatrixCell(eventKey, "telegram", e.target.checked)}
+                          disabled={!settings.notificationsEnabled || !settings.notificationChannels.telegram}
+                          data-testid={`matrix-${eventKey}-telegram`}
+                          className="w-4 h-4 rounded text-black dark:text-white"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Developer Mode (#787) */}
+      <section className="card" data-testid="developer-mode-section">
+        <h2 className="text-sm font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-4">
+          Developer Mode
+        </h2>
+        <div className="flex flex-col space-y-4">
+          <label className="flex flex-row items-center justify-between cursor-pointer">
+            <div>
+              <span className="text-sm font-medium">Developer Inspection Mode</span>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                Display raw Soroban contract storage keys and base64 XDR payloads in transaction confirmation dialogs.
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.developerMode}
+              onChange={(e) => updateSetting("developerMode", e.target.checked)}
+              data-testid="developer-mode-toggle"
+              className="w-5 h-5 rounded border-gray-300 dark:border-gray-600 text-black dark:text-white focus:ring-black dark:focus:ring-white"
+            />
+          </label>
+
+          {settings.developerMode && (
+            <div className="border-t border-gray-100 dark:border-gray-800 pt-3 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300 rounded">
+                  Active
+                </span>
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  Transaction confirmation dialogs (Cancel, Top Up, Withdraw) will now display raw contract storage keys and invocation XDR payloads for debugging.
+                </span>
+              </div>
+              <DeveloperPayloadInspector
+                contractId="CDUMMYSTREAMEXAMPLE1234567890ABCDEF1234567890"
+                method="cancel"
+                storageKeySymbol="info"
+              />
+            </div>
+          )}
         </div>
       </section>
 

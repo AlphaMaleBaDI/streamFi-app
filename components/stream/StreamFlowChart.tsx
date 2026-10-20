@@ -40,6 +40,10 @@ export function StreamFlowChart({
   height = 200,
 }: StreamFlowChartProps) {
   const [hoverPoint, setHoverPoint] = useState<DataPoint | null>(null);
+  // #722 — scrub slider position as a fraction of the chart timeline (0–1).
+  // When non-null, the chart shows the balance at that moment instead of the
+  // live hover point.
+  const [scrubRatio, setScrubRatio] = useState<number | null>(null);
 
   // Client-only wall-clock snapshot to avoid SSR hydration mismatch.
   // Use startTime as the SSR-safe default; the real time is set in
@@ -290,7 +294,7 @@ export function StreamFlowChart({
         </svg>
 
         {/* Tooltip Overlay */}
-        {hoverPoint && (
+        {hoverPoint && scrubRatio === null && (
           <div
             className="absolute z-20 pointer-events-none rounded-lg bg-gray-900 text-white text-xs px-3 py-1.5 shadow-lg border border-gray-700 font-mono"
             style={{
@@ -310,6 +314,36 @@ export function StreamFlowChart({
             )}
           </div>
         )}
+
+        {/* #722 — interactive scrub slider for withdrawable balance */}
+        <div className="mt-3 space-y-1">
+          <div className="flex items-center justify-between text-[10px] text-gray-400 font-mono">
+            <span>{formatTimestamp(start)}</span>
+            {scrubRatio !== null && (
+              <span className="text-black dark:text-white font-semibold">
+                {(() => {
+                  const time = Math.round(start + scrubRatio * (end - start));
+                  const pt = points.reduce((best, p) =>
+                    Math.abs(p.time - time) < Math.abs(best.time - time) ? p : best,
+                  );
+                  return `${formatTimestamp(pt.time)} → ${fromStroops(pt.amount)} ${tokenSymbol}`;
+                })()}
+              </span>
+            )}
+            <span>{formatTimestamp(end)}</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={1000}
+            value={scrubRatio !== null ? Math.round(scrubRatio * 1000) : 500}
+            onChange={(e) => setScrubRatio(Number(e.target.value) / 1000)}
+            onMouseUp={() => setScrubRatio(null)}
+            onTouchEnd={() => setScrubRatio(null)}
+            className="w-full accent-black dark:accent-white cursor-pointer"
+            aria-label="Scrub stream timeline to preview balance"
+          />
+        </div>
       </div>
     </div>
   );

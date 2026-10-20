@@ -34,3 +34,43 @@
     outline: 2px solid #000000;
   }
 }
+
+/* Responsive mobile layout for small screen widths (<375px / <= 480px) (#821) */
+@media (max-width: 480px) {
+  .flexRow {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+
+  .flexRowStart {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+
+  .inlineFlexRow {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .flexGrow {
+    width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .shrink0 {
+    flex-shrink: 1;
+  }
+
+  .flexRow input,
+  .flexRow select,
+  .flexRow button,
+  .inlineFlexRow input,
+  .inlineFlexRow select,
+  .inlineFlexRow button {
+    width: 100%;
+  }
+}
+

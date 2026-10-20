@@ -5,9 +5,17 @@ import { queuedTransactions } from '@/lib/offline-transactions';
 
 interface OfflineIndicatorProps {
   className?: string;
+  /** #738 — Set to true while a transaction is being signed to show a more urgent banner */
+  isSigning?: boolean;
 }
 
-export function OfflineIndicator({ className = '' }: OfflineIndicatorProps) {
+/**
+ * #738 — Display banner when network connection is lost during transaction sign.
+ *
+ * When `isSigning` is true and the connection drops, shows an urgent warning
+ * banner so the user knows their transaction will be queued, not lost.
+ */
+export function OfflineIndicator({ className = '', isSigning = false }: OfflineIndicatorProps) {
   const [isOnline, setIsOnline] = useState(true);
   const [queuedCount, setQueuedCount] = useState(0);
 
@@ -40,6 +48,24 @@ export function OfflineIndicator({ className = '' }: OfflineIndicatorProps) {
     queuedCount === 0
       ? 'transactions will be queued.'
       : `${queuedCount} transaction${queuedCount === 1 ? '' : 's'} queued for sync.`;
+
+  // #738 — During transaction signing, show a more urgent banner
+  if (isSigning) {
+    return (
+      <div
+        className={`
+          fixed top-0 left-0 right-0 bg-red-600 dark:bg-red-700
+          text-white text-sm px-4 py-3 text-center
+          z-50 shadow-lg ${className}
+        `}
+        role="alert"
+        aria-live="assertive"
+        aria-label="Connection lost during transaction"
+      >
+        <strong>Connection lost.</strong> Your transaction will be queued and submitted automatically when you reconnect.
+      </div>
+    );
+  }
 
   return (
     <div

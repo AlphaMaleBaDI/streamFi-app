@@ -14,6 +14,8 @@ import { queryClient }       from '@/lib/queryClient';
 import { queueTransaction } from '@/lib/offline-transactions';
 import { invalidateStreamMutation, invalidateProfileAndAllowance } from '@/lib/query-keys';
 import { optimisticStreamStatusUpdate, rollbackStreamStatus } from '@/lib/optimistic-updates';
+import { useSettings } from '@/hooks/useSettings';
+import { DeveloperPayloadInspector } from '@/components/DeveloperPayloadInspector';
 
 type StreamStatus = 'active' | 'paused' | 'ended' | 'cancelled';
 
@@ -41,6 +43,7 @@ export function StreamActions({
   isSender, isRecipient, withdrawable, totalDeposited = withdrawable, withdrawn = 0n, token, onSuccess,
 }: StreamActionsProps) {
   const { publicKey, signTx } = useWallet();
+  const { developerMode } = useSettings();
   const mounted = useRef(true);
 
   const [pending,     setPending]     = useState<string | null>(null);
@@ -251,6 +254,13 @@ export function StreamActions({
             <p className="text-xs text-gray-500 dark:text-gray-400">
               Total deposited: {fromStroops(totalDeposited)} {token}
             </p>
+            {developerMode && (
+              <DeveloperPayloadInspector
+                contractId={streamAddress}
+                method="cancel"
+                storageKeySymbol="info"
+              />
+            )}
             {actionError && <p className="text-xs text-red-600">{actionError}</p>}
             <div className="flex gap-2">
               <button
@@ -293,6 +303,14 @@ export function StreamActions({
               />
               {topUpErr && <p className="text-xs text-red-600 mt-1">{topUpErr}</p>}
             </div>
+            {developerMode && (
+              <DeveloperPayloadInspector
+                contractId={streamAddress}
+                method="top_up"
+                storageKeySymbol="info"
+                args={{ amount: topUpAmt || "0" }}
+              />
+            )}
             <div className="flex gap-2">
               <button
                 className="btn-primary flex-1"

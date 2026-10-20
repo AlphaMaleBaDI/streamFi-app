@@ -13,6 +13,8 @@ import { queryClient }          from '@/lib/queryClient';
 import { queueTransaction }     from '@/lib/offline-transactions';
 import { invalidateStreamMutation } from '@/lib/query-keys';
 import { getLargeWithdrawalThreshold, isLargeWithdrawal } from '@/lib/withdraw-config';
+import { useSettings } from '@/hooks/useSettings';
+import { DeveloperPayloadInspector } from '@/components/DeveloperPayloadInspector';
 
 type Step = 'idle' | 'signing' | 'submitting' | 'done' | 'error';
 
@@ -25,6 +27,7 @@ interface WithdrawButtonProps {
 
 export function WithdrawButton({ streamAddress, withdrawable, token, onSuccess }: WithdrawButtonProps) {
   const { publicKey, signTx } = useWallet();
+  const { developerMode } = useSettings();
   const mounted = useRef(true);
   const [step, setStep]     = useState<Step>('idle');
   const [txHash, setTxHash] = useState<string | null>(null);
@@ -225,6 +228,14 @@ export function WithdrawButton({ streamAddress, withdrawable, token, onSuccess }
               />
               {confirmError && <p className="text-xs text-red-600 mt-1">{confirmError}</p>}
             </div>
+            {developerMode && (
+              <DeveloperPayloadInspector
+                contractId={streamAddress}
+                method="withdraw"
+                storageKeySymbol="info"
+                args={{ amount: `${amount} ${token}`, stroops: withdrawable.toString() }}
+              />
+            )}
             <div className="flex gap-2">
               <button className="btn-primary flex-1" onClick={confirmAndWithdraw}>
                 Confirm withdrawal

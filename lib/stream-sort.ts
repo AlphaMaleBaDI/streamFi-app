@@ -10,6 +10,8 @@ export type SortKey = "default" | "amount-asc" | "amount-desc" | "end-asc" | "en
  */
 export const CLAIMABLE_DESC: SortKey = "claimable-desc";
 
+export interface StreamSortCriterion<T> { key: keyof T; direction?: "asc" | "desc"; }
+
 export const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "default", label: "Default order" },
   { value: "amount-asc", label: "Amount: Low to High" },
@@ -120,7 +122,7 @@ export function compareClaimableDesc<T extends SortableStream>(a: T, b: T, now: 
   return aValue > bValue ? -1 : 1;
 }
 
-export function sortStreams<T extends SortableStream>(
+function sortStreamsByKey<T extends SortableStream>(
   rows: T[],
   sort: SortKey,
   now: number = Math.floor(Date.now() / 1000),
@@ -139,4 +141,34 @@ export function sortStreams<T extends SortableStream>(
 
   const comparator = getComparator<T>(sort);
   return [...rows].sort(comparator);
+}
+
+/** Stable multi-criteria sorting; criteria are evaluated in declaration order. */
+export function sortStreamsByCriteria<T extends object>(rows: readonly T[], criteria: readonly StreamSortCriterion<T>[]): T[] {
+  return rows.map((value, index) => ({ value, index })).sort((a, b) => {
+    for (const criterion of criteria) {
+      const left = a.value[criterion.key];
+      const right = b.value[criterion.key];
+      if (left === right) continue;
+      const direction = criterion.direction === "desc" ? -1 : 1;
+      if (left == null) return -direction;
+      if (right == null) return direction;
+      return (left < right ? -1 : 1) * direction;
+    }
+    return a.index - b.index;
+  }).map(({ value }) => value);
+}
+
+export function sortStreams<T extends SortableStream>(
+  rows: T[], sort: SortKey, now?: number,
+): T[];
+export function sortStreams<T extends object>(
+  rows: readonly T[], criteria: readonly StreamSortCriterion<T>[],
+): T[];
+export function sortStreams(
+  rows: readonly any[], sortOrCriteria: SortKey | readonly StreamSortCriterion<any>[], now?: number,
+): any[] {
+  return Array.isArray(sortOrCriteria)
+    ? sortStreamsByCriteria(rows, sortOrCriteria)
+    : sortStreamsByKey([...rows], sortOrCriteria, now);
 }

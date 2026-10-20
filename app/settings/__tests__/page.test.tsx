@@ -122,4 +122,73 @@ describe("SettingsPage", () => {
     expect(container.textContent).toContain("Auto-Refresh Interval");
     cleanup(root, container);
   });
+
+  it("renders notification channels (Email, Telegram, Browser Push) and preferences matrix (#786)", () => {
+    const { container, root } = renderSettings();
+    expect(container.textContent).toContain("Notification Channels");
+    expect(container.textContent).toContain("Browser Push");
+    expect(container.textContent).toContain("Email");
+    expect(container.textContent).toContain("Telegram");
+
+    expect(container.textContent).toContain("Notification Preferences Matrix");
+    expect(container.textContent).toContain("Stream Cancelled");
+    expect(container.textContent).toContain("Cliff Reached");
+    expect(container.textContent).toContain("Stream Completed");
+    expect(container.textContent).toContain("Funds Withdrawn");
+
+    const matrix = container.querySelector('[data-testid="notification-matrix"]');
+    expect(matrix).not.toBeNull();
+
+    const pushToggle = container.querySelector('[data-testid="channel-toggle-browserPush"]');
+    const emailToggle = container.querySelector('[data-testid="channel-toggle-email"]');
+    const telegramToggle = container.querySelector('[data-testid="channel-toggle-telegram"]');
+    expect(pushToggle).not.toBeNull();
+    expect(emailToggle).not.toBeNull();
+    expect(telegramToggle).not.toBeNull();
+
+    cleanup(root, container);
+  });
+
+  it("toggles notification channels and updates matrix cells (#786)", () => {
+    const { container, root } = renderSettings();
+    const telegramToggle = container.querySelector('[data-testid="channel-toggle-telegram"]') as HTMLInputElement | null;
+    expect(telegramToggle).not.toBeNull();
+
+    act(() => {
+      telegramToggle!.click();
+    });
+
+    const matrixCell = container.querySelector('[data-testid="matrix-streamCancel-telegram"]') as HTMLInputElement | null;
+    expect(matrixCell).not.toBeNull();
+
+    cleanup(root, container);
+  });
+
+  it("renders Developer Mode toggle and reveals raw storage keys and XDR preview (#787)", () => {
+    const { container, root } = renderSettings();
+    expect(container.textContent).toContain("Developer Mode");
+    expect(container.textContent).toContain("Developer Inspection Mode");
+
+    const devToggle = container.querySelector('[data-testid="developer-mode-toggle"]') as HTMLInputElement | null;
+    expect(devToggle).not.toBeNull();
+    expect(devToggle?.checked).toBe(false);
+
+    // Toggle Developer Mode on
+    act(() => {
+      devToggle!.click();
+    });
+
+    expect(devToggle?.checked).toBe(true);
+    expect(container.textContent).toContain("Developer Mode: Raw Contract Data & XDR");
+    expect(container.textContent).toContain("Raw Contract Storage Key (LedgerKey XDR)");
+    expect(container.textContent).toContain("Raw Invocation XDR");
+
+    const storageKeyEl = container.querySelector('[data-testid="raw-storage-key-xdr"]');
+    expect(storageKeyEl).not.toBeNull();
+
+    const invocationXdrEl = container.querySelector('[data-testid="raw-invocation-xdr"]');
+    expect(invocationXdrEl).not.toBeNull();
+
+    cleanup(root, container);
+  });
 });
