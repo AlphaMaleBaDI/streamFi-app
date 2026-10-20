@@ -17,6 +17,7 @@ import { invalidateTokenBalance } from '@/hooks/useTokenBalance';
 import { getFactoryContractId } from '@/lib/env';
 import { getTokenAllowanceGateway } from '@/lib/token-allowance-gateway';
 import { useDebounce } from '@/hooks/useDebounce';
+import { FeePreview } from '@/components/stream/FeePreview';
 import styles from './CreateStream.module.css';
 import { toStroops, fromStroops, wouldRateTruncateToZero } from '@/lib/format';
 import { isValidStellarAddress, isValidStellarContract, isValidStellarPublicKey } from '@/lib/stellar-address';
@@ -655,6 +656,9 @@ export default function CreatePage() {
             </div>
           </div>
         )}
+
+        {/* Fee preview (#721) — live breakdown of network fees and protocol bps */}
+        <FeePreview depositAmount={deposit || ''} tokenSymbol={token} />
 
         {/* Clawback */}
         <label className={`flex items-start gap-3 cursor-pointer ${styles.flexRowStart}`}>
