@@ -34,6 +34,8 @@ interface SettingsState {
    * Minimum enforced value is 10 s to avoid hammering the RPC endpoint. Added #572.
    */
   autoRefreshInterval: RefreshIntervalSeconds;
+  /** Local currency for fiat display. Added #731. */
+  currency: 'USD' | 'EUR' | 'GBP';
 }
 
 const STORAGE_KEY = "conduit:settings";
@@ -62,6 +64,7 @@ function loadSettings(): SettingsState {
         )
           ? (parsed.autoRefreshInterval as RefreshIntervalSeconds)
           : 0,
+        currency: parsed.currency === "EUR" ? "EUR" : parsed.currency === "GBP" ? "GBP" : "USD",
       };
     }
   } catch {
@@ -73,6 +76,7 @@ function loadSettings(): SettingsState {
     notificationsEnabled: true,
     timeFormat: "absolute",
     autoRefreshInterval: 0,
+    currency: "USD",
   };
 }
 
@@ -381,6 +385,27 @@ export default function SettingsPage() {
                   {opt.label}
                 </option>
               ))}
+            </select>
+          </div>
+
+          {/* Currency Display — issue #731 */}
+          <div className="flex flex-row items-center justify-between">
+            <div>
+              <span className="text-sm">Display Currency</span>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                Show fiat estimates alongside token amounts.
+              </p>
+            </div>
+            <select
+              value={settings.currency}
+              onChange={(e) =>
+                updateSetting("currency", e.target.value as "USD" | "EUR" | "GBP")
+              }
+              className="bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded px-3 py-1.5 text-sm"
+            >
+              <option value="USD">USD ($)</option>
+              <option value="EUR">EUR (€)</option>
+              <option value="GBP">GBP (£)</option>
             </select>
           </div>
         </div>
