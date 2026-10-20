@@ -1,4 +1,5 @@
 'use client';
+import { captureError } from "@/lib/error-tracking";
 
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 
@@ -50,7 +51,7 @@ export class ErrorBoundary extends Component<Props, State> {
       return { errorCount: newCount };
     });
 
-    console.error('ErrorBoundary caught:', error.message, errorInfo.componentStack);
+    captureError(error, { tags: { source: 'ErrorBoundary' }, extra: { componentStack: errorInfo.componentStack } });
     this.props.onError?.(error, errorInfo);
   }
 
@@ -62,6 +63,17 @@ export class ErrorBoundary extends Component<Props, State> {
 
   public componentDidMount() {
     window.addEventListener('unhandledrejection', this.handleUnhandledRejection);
+  }
+
+  public componentDidUpdate(_prevProps: Props, prevState: State) {
+    const breakerTripped =
+      this.state.hasError &&
+      this.state.errorCount >= MAX_ERROR_COUNT &&
+      prevState.errorCount < MAX_ERROR_COUNT;
+
+    if (breakerTripped) {
+      this.scheduleReset();
+    }
   }
 
   public componentWillUnmount() {
@@ -98,7 +110,6 @@ export class ErrorBoundary extends Component<Props, State> {
   public render() {
     if (this.state.hasError) {
       if (this.state.errorCount >= MAX_ERROR_COUNT) {
-        this.scheduleReset();
         return React.createElement('div', { className: 'flex items-center justify-center min-h-[200px]' },
           React.createElement('div', { className: 'text-center p-6 max-w-md' },
             React.createElement('h2', { className: 'text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2' }, 'Too many errors'),
@@ -111,7 +122,8 @@ export class ErrorBoundary extends Component<Props, State> {
         return this.props.fallback(this.state.error!, this.retry, this.reset);
       }
 
-      return React.createElement('div', { className: 'flex items-center justify-center min-h-[200px]' },
+      // Scoped to this boundary, so wrapping a single stream card keeps the rest of the page usable.
+      return React.createElement('div', { role: 'alert', className: 'flex items-center justify-center min-h-[200px]' },
         React.createElement('div', { className: 'text-center p-6 max-w-md' },
           React.createElement('h2', { className: 'text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2' }, 'Something went wrong'),
           React.createElement('p', { className: 'text-sm text-gray-500 dark:text-gray-400 mb-4' }, this.state.error?.message || 'An unexpected error occurred.'),

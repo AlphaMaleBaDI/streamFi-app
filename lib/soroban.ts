@@ -20,6 +20,7 @@
 
 import {
   Contract,
+  Keypair,
   SorobanRpc,
   TransactionBuilder,
   BASE_FEE,
@@ -31,6 +32,9 @@ import {
   normalizeError,
   OperationAbortedError,
 } from './safe-operations';
+import { withTimeout } from './with-timeout';
+import { isValidStellarContract, isValidStellarPublicKey } from './stellar-address';
+import { reportRpcFailure, reportRpcSuccess } from './network-status';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -43,30 +47,128 @@ const MAX_POLL_ATTEMPTS = 30;
 const FEE_STATS_TTL_MS = 30_000;   // fee stats are ledger-scoped; 30s is plenty
 const MAX_INCLUSION_FEE = 1_000_000; // 0.1 XLM — never bid more than this
 
-// Circuit breaker state
-let consecutiveFailures = 0;
-let circuitOpenUntil = 0;
-
-function resetCircuitBreaker(): void {
-  consecutiveFailures = 0;
-  circuitOpenUntil = 0;
+// Circuit breaker state scoped per-endpoint
+interface CircuitState {
+  consecutiveFailures: number;
+  circuitOpenUntil: number;
 }
 
-function isCircuitOpen(): boolean {
-  if (circuitOpenUntil > Date.now()) return true;
-  if (circuitOpenUntil > 0 && circuitOpenUntil <= Date.now()) {
-    resetCircuitBreaker();
+/** A per-scope circuit-breaker snapshot returned by {@link getCircuitBreakerStates}. */
+export interface CircuitBreakerState {
+  /** The circuit key: the RPC URL, optionally suffixed with `::<scope>`. */
+  scope: string;
+  consecutiveFailures: number;
+  circuitOpenUntil: number;
+  /** True while `circuitOpenUntil` is still in the future. */
+  isOpen: boolean;
+  /** Milliseconds until the circuit half-opens, or 0 when closed. */
+  remainingMs: number;
+}
+
+const circuitBreakers = new Map<string, CircuitState>();
+
+function getCircuitKey(scope?: string): string {
+  let rpcUrl = '';
+  try {
+    rpcUrl = getRpcUrl();
+  } catch {
+    rpcUrl = 'default';
+  }
+  return scope ? `${rpcUrl}::${scope}` : rpcUrl;
+}
+
+function getCircuitState(key: string): CircuitState {
+  let state = circuitBreakers.get(key);
+  if (!state) {
+    state = { consecutiveFailures: 0, circuitOpenUntil: 0 };
+    circuitBreakers.set(key, state);
+  }
+  return state;
+}
+
+/**
+ * Reset circuit breaker state for a specific scope/endpoint, or all if none provided.
+ * Useful on wallet disconnect, network switch, or after manual retry.
+ */
+export function resetCircuitBreaker(scope?: string): void {
+  // Any path that clears the breaker considers the RPC healthy — a successful
+  // round-trip, an on-chain revert, or a wallet/network switch that starts
+  // fresh. Clear the global "network trouble" banner to match.
+  reportRpcSuccess();
+  if (scope) {
+    const key = getCircuitKey(scope);
+    circuitBreakers.delete(key);
+    for (const k of circuitBreakers.keys()) {
+      if (k === scope || k.startsWith(`${scope}::`) || k.startsWith(`${key}::`)) {
+        circuitBreakers.delete(k);
+      }
+    }
+  } else {
+    circuitBreakers.clear();
+  }
+}
+
+/**
+ * Return a snapshot of every circuit breaker scope, sorted by scope name.
+ */
+export function getCircuitBreakerStates(): CircuitBreakerState[] {
+  const now = Date.now();
+  const entries: CircuitBreakerState[] = [];
+  for (const [key, state] of circuitBreakers.entries()) {
+    const isOpen = state.circuitOpenUntil > now;
+    entries.push({
+      scope: key,
+      consecutiveFailures: state.consecutiveFailures,
+      circuitOpenUntil: state.circuitOpenUntil,
+      isOpen,
+      remainingMs: isOpen ? Math.max(0, state.circuitOpenUntil - now) : 0,
+    });
+  }
+  return entries.sort((a, b) => a.scope.localeCompare(b.scope));
+}
+
+/**
+ * Check if the circuit breaker is open for a given scope/endpoint.
+ */
+export function isCircuitOpen(scope?: string): boolean {
+  const key = getCircuitKey(scope);
+  const state = circuitBreakers.get(key);
+  if (!state) return false;
+  if (state.circuitOpenUntil > Date.now()) return true;
+  if (state.circuitOpenUntil > 0 && state.circuitOpenUntil <= Date.now()) {
+    state.consecutiveFailures = 0;
+    state.circuitOpenUntil = 0;
   }
   return false;
 }
 
-function recordFailure(): void {
-  consecutiveFailures++;
-  if (consecutiveFailures >= 3) {
+/**
+ * Test connectivity for a circuit breaker scope and update breaker state.
+ * Resets breaker on success or records failure.
+ */
+export async function testCircuit(scope?: string): Promise<boolean> {
+  try {
+    const server = getServer();
+    await server.getFeeStats();
+    resetCircuitBreaker(scope);
+    return true;
+  } catch (err) {
+    if (isTransportFailure(err)) {
+      recordFailure(scope);
+    }
+    return false;
+  }
+}
+
+function recordFailure(scope?: string): void {
+  const key = getCircuitKey(scope);
+  const state = getCircuitState(key);
+  state.consecutiveFailures++;
+  if (state.consecutiveFailures >= 3) {
     // Open circuit for 10s * 2^(failures-3) ms with jitter
-    const base = 10_000 * Math.pow(2, consecutiveFailures - 3);
+    const base = 10_000 * Math.pow(2, state.consecutiveFailures - 3);
     const jitter = Math.random() * 0.3 * base;
-    circuitOpenUntil = Date.now() + base + jitter;
+    state.circuitOpenUntil = Date.now() + base + jitter;
   }
 }
 
@@ -105,6 +207,11 @@ export class TransactionRevertedError extends Error {
 // during the build's static-generation pass, before real env vars exist.
 let serverInstance: SorobanRpc.Server | undefined;
 
+// Brief negative cache for checkRecipientExists — mirrors SDK behaviour (#451).
+// Declared here (not next to checkRecipientExists) so resetServer() can clear it.
+const NEGATIVE_CACHE_TTL_MS = 5_000;
+const recipientNegativeCache = new Map<string, number>();
+
 function getServer(): SorobanRpc.Server {
   if (!serverInstance) {
     const rpcUrl = getRpcUrl();
@@ -117,9 +224,18 @@ function getServer(): SorobanRpc.Server {
 
 /**
  * Reset the RPC server instance — useful after network errors or config changes.
+ * Also clears the module-level caches (fee stats, recipient negative cache) so
+ * tests and a manual network switch start from a clean slate.
  */
 export function resetServer(): void {
   serverInstance = undefined;
+  feeStatsCache = undefined;
+  recipientNegativeCache.clear();
+}
+
+/** Test-only: clear the inclusion-fee cache so fee-stats tests are isolated. */
+export function __clearFeeStatsCache(): void {
+  feeStatsCache = undefined;
 }
 
 // ── Retry / Backoff ───────────────────────────────────────────────────────────
@@ -130,9 +246,11 @@ async function withRetry<T>(
     context?:   string;
     signal?:    AbortSignal;
     maxRetries?: number;
+    scope?:     string;
   },
 ): Promise<T> {
   const maxRetries = options?.maxRetries ?? MAX_RETRIES;
+  const scope = options?.scope ?? options?.context;
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -141,17 +259,20 @@ async function withRetry<T>(
     }
 
     // Check circuit breaker before making the call
-    if (isCircuitOpen()) {
+    if (isCircuitOpen(scope)) {
+      const key = getCircuitKey(scope);
+      const state = getCircuitState(key);
+      reportRpcFailure();
       throw new Error(
         `Circuit breaker open — too many consecutive failures. ` +
-        `Retry in ${Math.ceil((circuitOpenUntil - Date.now()) / 1000)}s.`,
+        `Retry in ${Math.ceil((state.circuitOpenUntil - Date.now()) / 1000)}s.`,
       );
     }
 
     try {
       const result = await fn(attempt + 1);
       // Success — reset circuit breaker
-      resetCircuitBreaker();
+      resetCircuitBreaker(scope);
       return result;
     } catch (err) {
       lastError = err;
@@ -169,7 +290,13 @@ async function withRetry<T>(
         // the breaker is designed to protect against (see #283). Anything
         // else (an on-chain revert, a malformed payload) leaves the breaker
         // untouched because the RPC itself is healthy (see #359).
-        if (isTransportFailure(err)) recordFailure();
+        if (isTransportFailure(err)) {
+          recordFailure(scope);
+          // Surface the outage to the UI immediately — a single failed
+          // round-trip is enough to show the banner, without waiting for the
+          // breaker to trip after three.
+          reportRpcFailure();
+        }
         throw err;
       }
 
@@ -189,36 +316,10 @@ async function withRetry<T>(
 
 // ── Timeout wrapper ───────────────────────────────────────────────────────────
 
-async function withTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-  context?: string,
-  signal?: AbortSignal,
-): Promise<T> {
-  validateTimeout(ms);
-  if (signal?.aborted) throw new OperationAbortedError();
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        context
-          ? new Error(`${context} timed out after ${ms}ms`)
-          : new Error(`Operation timed out after ${ms}ms`),
-        );
-      }, ms);
-    onAbort = () => reject(new OperationAbortedError());
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    clearTimeout(timer);
-    if (onAbort) signal?.removeEventListener('abort', onAbort);
-  }
-}
+// `withTimeout` used to be reimplemented here; it now lives in
+// lib/with-timeout.ts alongside the copies that had drifted out of
+// app/create/page.tsx and contexts/WalletContext.tsx (#393). The signature is
+// unchanged: withTimeout(promise, ms, context, signal).
 
 function validateTimeout(ms: number): void {
   if (!Number.isSafeInteger(ms) || ms <= 0) {
@@ -240,6 +341,12 @@ function validateCall(
 // ── Fee pricing ───────────────────────────────────────────────────────────────
 
 let feeStatsCache: { fee: number; at: number } | undefined;
+
+/** Latest closed ledger sequence from the RPC node. */
+export async function getLatestLedgerSequence(): Promise<number> {
+  const { sequence } = await getServer().getLatestLedger();
+  return sequence;
+}
 
 /**
  * Price the inclusion (bid) fee for a contract transaction.
@@ -299,6 +406,18 @@ export interface InvokeContractOptions {
   idempotencyKey?: string;
 }
 
+/** Result of a confirmed contract invocation. */
+export interface InvokeContractResult {
+  /** The submitted transaction's hash. */
+  hash: string;
+  /**
+   * The contract function's return value, as reported by GetTransactionStatus
+   * on SUCCESS. `undefined` if the confirmed transaction carried no retval
+   * (e.g. the invoked function returns void).
+   */
+  returnValue?: xdr.ScVal;
+}
+
 /**
  * Build a contract-call transaction, simulate it to get the fee + footprint,
  * assemble it, hand it to the wallet for signing, then submit and poll.
@@ -323,7 +442,7 @@ export async function invokeContract(
   args:       xdr.ScVal[],
   signTx:     (xdrBase64: string, signal?: AbortSignal) => Promise<string>,
   options?:   InvokeContractOptions,
-): Promise<string> {
+): Promise<InvokeContractResult> {
   const signal = options?.signal;
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const idempotencyKey = options?.idempotencyKey;
@@ -332,7 +451,7 @@ export async function invokeContract(
   validateTimeout(timeoutMs);
 
   // If an idempotency key is provided, deduplicate
-  const operation = async (): Promise<string> => {
+  const operation = async (): Promise<InvokeContractResult> => {
     if (signal?.aborted) throw new OperationAbortedError();
 
     const passphrase = getNetworkPassphrase();
@@ -428,12 +547,16 @@ export async function invokeContract(
  * reach a verdict (transient RPC errors, or the confirmation window elapsing)
  * the hash is returned as *pending* rather than replaying the transaction:
  * it is already on-chain and the caller can look it up (see #358).
+ *
+ * On SUCCESS the confirmed transaction's return value is surfaced so callers
+ * like DripFactory::create_stream can obtain the assigned stream_id without
+ * a separate re-query (see #362).
  */
 async function pollForConfirmation(
   hash: string,
   timeoutMs: number,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<InvokeContractResult> {
   for (let i = 0; i < MAX_POLL_ATTEMPTS; i++) {
     if (signal?.aborted) throw new OperationAbortedError();
 
@@ -459,7 +582,7 @@ async function pollForConfirmation(
     if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
       // The RPC round-trip completed — the network is healthy.
       resetCircuitBreaker();
-      return hash;
+      return { hash, returnValue: status.returnValue };
     }
     if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
       // The transaction executed and the contract reverted. The RPC worked
@@ -471,7 +594,7 @@ async function pollForConfirmation(
   }
 
   // Submitted but unconfirmed within the window — pending, not failed.
-  return hash;
+  return { hash };
 }
 
 /**
@@ -500,45 +623,40 @@ export async function simulateReadOnly(
   validateTimeout(timeoutMs);
   if (signal?.aborted) throw new OperationAbortedError();
 
-  return withRetry(async () => {
-    const account  = await withTimeout(
-      getServer().getAccount(source),
-      timeoutMs,
-      'simulateReadOnly/getAccount',
-      signal,
-    );
-    const fee = await getInclusionFee(timeoutMs, signal);
-    const contract = new Contract(contractId);
-    const tx = new TransactionBuilder(account, {
-      fee,
-      networkPassphrase: getNetworkPassphrase(),
-    })
-      .addOperation(contract.call(method, ...args))
-      .setTimeout(60)
-      .build();
-
-    if (signal?.aborted) throw new OperationAbortedError();
-
-    const result = await withTimeout(
-      getServer().simulateTransaction(tx),
-      timeoutMs,
-      'simulateTransaction',
-      signal,
-    );
-
-    if (signal?.aborted) throw new OperationAbortedError();
-
-    if (SorobanRpc.Api.isSimulationError(result)) {
-      throw new Error(`Simulation error: ${result.error}`);
-    }
-    const retval = result.result?.retval;
-    if (!retval) throw new Error('No result returned from simulation');
-
-    return xdr.ScVal.fromXDR(retval.toXDR());
-  }, {
-    context: `simulateReadOnly(${method})`,
+  const account  = await withTimeout(
+    getServer().getAccount(source),
+    timeoutMs,
+    'simulateReadOnly/getAccount',
     signal,
-  });
+  );
+  const fee = await getInclusionFee(timeoutMs, signal);
+  const contract = new Contract(contractId);
+  const tx = new TransactionBuilder(account, {
+    fee,
+    networkPassphrase: getNetworkPassphrase(),
+  })
+    .addOperation(contract.call(method, ...args))
+    .setTimeout(60)
+    .build();
+
+  if (signal?.aborted) throw new OperationAbortedError();
+
+  const result = await withTimeout(
+    getServer().simulateTransaction(tx),
+    timeoutMs,
+    'simulateTransaction',
+    signal,
+  );
+
+  if (signal?.aborted) throw new OperationAbortedError();
+
+  if (SorobanRpc.Api.isSimulationError(result)) {
+    throw new Error(`Simulation error: ${result.error}`);
+  }
+  const retval = result.result?.retval;
+  if (!retval) throw new Error('No result returned from simulation');
+
+  return xdr.ScVal.fromXDR(retval.toXDR());
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -587,22 +705,64 @@ export function scValToU64(val: xdr.ScVal): bigint {
 }
 
 /**
- * Check whether a Stellar account exists on-chain.
+ * The ledger key whose presence proves a recipient address exists on-chain.
  *
- * Uses `getAccount()` against the configured Soroban RPC / Horizon endpoint.
- * Returns `true` if the account is funded and exists, `false` if the RPC
- * returns a 404-style "account not found" response.
+ * - G… public key  → the account entry itself.
+ * - C… contract    → the contract's instance entry, which every deployed
+ *                    contract has and which is always persistent.
  *
- * Throws for any other network error so callers can distinguish
- * "definitely does not exist" from "couldn't reach the network".
+ * Mirrors the keys `Server.getAccount()` / `Server.getContractData()` build
+ * internally, so the lookup below is the same one — minus their habit of
+ * rejecting with a `{ code: 404 }` object that the caller has to interpret.
+ */
+function recipientLedgerKey(address: string): xdr.LedgerKey {
+  if (isValidStellarContract(address)) {
+    return xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract:   new Contract(address).address().toScAddress(),
+        key:        xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: xdr.ContractDataDurability.persistent(),
+      }),
+    );
+  }
+  if (!isValidStellarPublicKey(address)) {
+    throw new Error(`Not a valid Stellar address: ${address}`);
+  }
+  return xdr.LedgerKey.account(
+    new xdr.LedgerKeyAccount({
+      accountId: Keypair.fromPublicKey(address).xdrPublicKey(),
+    }),
+  );
+}
+
+/**
+ * Check whether a Stellar address exists on-chain.
+ *
+ * Asks the RPC for the address's ledger entry directly: an empty `entries`
+ * array is the ledger stating the address is not there, which is the only
+ * evidence this function accepts for `false`. Anything that throws — a
+ * transport failure, a JSON-RPC error, an HTTP 404 from a mistyped
+ * `NEXT_PUBLIC_SOROBAN_RPC_URL`, a proxy error page — propagates as
+ * "couldn't check".
+ *
+ * This used to be decided by substring-matching the error text for
+ * "not found" or "404" (#391), which conflated three different things:
+ * a genuinely missing account, `Method not found` from a wrong RPC version,
+ * and a 404 from a broken RPC URL. The last two made the create form tell
+ * the user "Recipient account not found" when the recipient was fine and
+ * the RPC configuration was not. Worse, it never actually caught the case
+ * it was written for: `getAccount()` rejects with a plain
+ * `{ code: 404, message: … }` object, not an `Error`, so a real missing
+ * account stringified to "[object Object]" and matched nothing.
  *
  * Accepts an optional AbortSignal so callers can cancel in-flight checks
  * (e.g. when the user changes the address or navigates away) and an optional
  * timeoutMs so a hung RPC provider never keeps the caller waiting forever.
  * Defaults to 10s if not specified.
  *
- * @param address    Stellar G… public key
+ * @param address    Stellar public key (G…) or contract address (C…)
  * @param options    Optional signal and timeout
+ * @returns          `true` / `false` when the ledger answered; throws when it didn't
  */
 export async function checkRecipientExists(
   address: string,
@@ -612,25 +772,29 @@ export async function checkRecipientExists(
 
   if (options?.signal?.aborted) throw new OperationAbortedError();
 
-  try {
-    await withTimeout(
-      getServer().getAccount(address),
-      timeoutMs,
-      'checkRecipientExists',
-      options?.signal,
-    );
-    return true;
-  } catch (err: unknown) {
-    // Re-throw abort/cancellation so callers can distinguish it from a
-    // network failure and skip updating React state after unmount.
-    if (err instanceof OperationAbortedError) throw err;
-
-    // stellar-sdk throws an error whose message contains "404" or
-    // "Account not found" when the account has never been funded.
-    const message = err instanceof Error ? err.message : String(err);
-    if (/not found|404/i.test(message)) return false;
-    throw err;
+  const cachedUntil = recipientNegativeCache.get(address);
+  if (cachedUntil !== undefined && Date.now() < cachedUntil) {
+    return false;
   }
+  recipientNegativeCache.delete(address);
+
+  const { entries } = await withTimeout(
+    getServer().getLedgerEntries(recipientLedgerKey(address)),
+    timeoutMs,
+    'checkRecipientExists',
+    options?.signal,
+  );
+
+  // A response without an `entries` array is a malformed payload, not proof
+  // of absence — say so rather than reporting the recipient as nonexistent.
+  if (!Array.isArray(entries)) {
+    throw new Error('Malformed RPC payload: getLedgerEntries returned no entries array');
+  }
+  const exists = entries.length > 0;
+  if (!exists) {
+    recipientNegativeCache.set(address, Date.now() + NEGATIVE_CACHE_TTL_MS);
+  }
+  return exists;
 }
 
 /** Minimum native XLM (in stroops) an account must hold to be considered funded. */
