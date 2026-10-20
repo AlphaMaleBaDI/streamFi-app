@@ -276,6 +276,15 @@ export function TokenSelector({
                     className="w-full text-left px-3 py-2 text-xs hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-40"
                   >
                     <span className="font-semibold">{t.symbol}</span>
+                    {t.verified && (
+                      <span
+                        className="inline-flex items-center ml-1 text-blue-500"
+                        title="Verified token"
+                        aria-label="Verified token"
+                      >
+                        ✓
+                      </span>
+                    )}
                     <span className="text-gray-500 dark:text-gray-400"> — {t.name}</span>
                     {t.address && (
                       <span className="block font-mono text-[10px] text-gray-400 truncate">
