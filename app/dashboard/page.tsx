@@ -302,6 +302,43 @@ export default function DashboardPage() {
     return activeStreams.filter((stream) => stream.info.endTime > now && stream.info.endTime <= weekFromNow).length;
   }, [activeStreams]);
 
+  // #774 — Real-time earnings ticker: aggregate rate across all active
+  // incoming streams, updated every second to show live earnings.
+  const [liveEarnings, setLiveEarnings] = useState<bigint>(0n);
+  useEffect(() => {
+    if (!connected || activeRunRate === 0n) {
+      setLiveEarnings(0n);
+      return;
+    }
+    // Update every second to show real-time earnings
+    const interval = setInterval(() => {
+      setLiveEarnings((prev) => prev + activeRunRate);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [connected, activeRunRate]);
+
+  // #773 — Volume timeline filter: 24h, 7d, 30d, 1y, All
+  const [volumeFilter, setVolumeFilter] = useState<'24h' | '7d' | '30d' | '1y' | 'all'>('all');
+  const volumeFilterOptions: Array<{ value: typeof volumeFilter; label: string }> = [
+    { value: '24h', label: '24H' },
+    { value: '7d', label: '7D' },
+    { value: '30d', label: '30D' },
+    { value: '1y', label: '1Y' },
+    { value: 'all', label: 'All' },
+  ];
+  const filteredByVolume = useMemo(() => {
+    if (volumeFilter === 'all') return allStreams;
+    const now = Math.floor(Date.now() / 1000);
+    const periods: Record<string, number> = {
+      '24h': 24 * 60 * 60,
+      '7d': 7 * 24 * 60 * 60,
+      '30d': 30 * 24 * 60 * 60,
+      '1y': 365 * 24 * 60 * 60,
+    };
+    const cutoff = now - periods[volumeFilter];
+    return allStreams.filter((s) => s.info.startTime >= cutoff);
+  }, [allStreams, volumeFilter]);
+
   const displayed = tab === "receiving" ? filteredReceiving : filteredSending;
 
   const STATS = [
@@ -312,6 +349,11 @@ export default function DashboardPage() {
     {
       label: t("stats.activeRunRate"),
       value: loading ? "…" : error ? "—" : `${fromStroops(activeRunRate)} /s`,
+    },
+    {
+      // #774 — Real-time earnings ticker
+      label: t("stats.liveEarnings") || "Live Earnings",
+      value: loading ? "…" : error ? "—" : fromStroops(liveEarnings),
     },
     {
       label: t("stats.totalValueStreamed"),
@@ -347,6 +389,53 @@ export default function DashboardPage() {
             onChange={(e) => setRangePreset(e.target.value as DateRangePreset)}
             className="border-gray-300 dark:border-gray-700 border py-1 px-2 text-sm rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm"
           >
+            {DATE_RANGE_PRESETS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          {rangePreset === "custom" && (
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                aria-label="Range start"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="border-gray-300 dark:border-gray-700 border py-1 px-2 text-sm rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm"
+              />
+              <span className="text-xs text-gray-400">{t("rangeTo")}</span>
+              <input
+                type="date"
+                aria-label="Range end"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="border-gray-300 dark:border-gray-700 border py-1 px-2 text-sm rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm"
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* #773 — Volume timeline filter */}
+      {connected && (
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <span className="text-xs text-gray-400 dark:text-gray-500">Volume:</span>
+          {volumeFilterOptions.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setVolumeFilter(opt.value)}
+              className={`px-3 py-1 text-xs font-semibold rounded transition-colors ${
+                volumeFilter === opt.value
+                  ? 'bg-black text-white dark:bg-white dark:text-black'
+                  : 'border border-gray-300 dark:border-gray-700 text-gray-500 hover:text-black dark:hover:text-white'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
             {DATE_RANGE_PRESETS.map((p) => (
               <option key={p.value} value={p.value}>
                 {p.label}
