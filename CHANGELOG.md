@@ -5,6 +5,7 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ## [Unreleased]
 
 ### Added
+- `/streams/compare` - comparison metrics for remaining balance and stream completion percentage: a static completion bar so columns can be compared at a glance, the remaining balance, and a projected completion timestamp that lands later than the scheduled end for paused streams (#783)
 - `lib/i18n/` — i18next/react-i18next bootstrap and a `dashboard` message namespace;
   `/dashboard` is fully externalized as the proof-of-concept page for the string-externalization
   migration (#558)
